@@ -48,7 +48,7 @@ the simulation provenance; it is not needed to establish the core FEM runtime.
 For interactive shell access:
 
 ```bash
-docker compose exec dev bash
+docker compose run --rm dev bash
 fdm-strength info
 ```
 
