@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "styrkeanalyse-fdm"
+version = "0.1.0"
+description = "G-code-informed strength analysis for FDM-printed parts"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = { text = "MIT" }
+authors = [{ name = "Marcus Funt" }]
+dependencies = [
+  "meshio>=5.3,<6",
+  "numpy>=2.0,<3",
+  "polars>=1.0,<2",
+  "pyarrow>=16,<24",
+  "pydantic>=2.8,<3",
+  "gcodeparser>=0.2,<1",
+  "pynitefea>=1.5,<2",
+  "pyvista>=0.45,<1",
+  "pyyaml>=6.0,<7",
+  "rich>=13.9,<15",
+  "scipy>=1.13,<2",
+  "trimesh>=4.5,<5",
+  "typer>=0.15,<1",
+]
+
+[dependency-groups]
+dev = [
+  "hypothesis>=6.0,<7",
+  "pytest>=8.0,<9",
+  "pytest-cov>=6.0,<7",
+  "ruff>=0.9,<1",
+]
+
+[project.scripts]
+fdm-strength = "fdm_strength.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fdm_strength"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
