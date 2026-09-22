@@ -98,6 +98,8 @@ back to its references. `docs/reference-implementations.md` covers the existing
 open-source projects each milestone can build on, with licences and measured
 effort estimates, and `docs/execution-environments.md` covers how those
 mutually incompatible dependency sets are split across containers.
+`docs/glossary.md` explains the terminology all three use, with a compact
+lookup table at the end.
 
 1. Declare a unit convention, the canonical data schema and a provenance record.
 2. Add analytical tensile and three-point-bend reductions as the solver oracle.
