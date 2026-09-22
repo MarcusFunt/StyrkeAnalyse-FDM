@@ -442,9 +442,14 @@ SOP's answer about how much fidelity actually buys you.
   3. Report where the index **fails**, citing [39] and [29]. A documented
      breakdown is a result, not a defect in the work.
 
-CalculiX supports orthotropic elasticity and local orientations directly
-(`*ELASTIC, TYPE=ORTHOTROPIC` with `*ORIENTATION`), so the cross-check from M4
-extends to this milestone unchanged.
+CalculiX supports orthotropic elasticity and local orientations directly, so
+the cross-check from M4 extends to this milestone unchanged. With measured
+engineering constants, use `*ELASTIC, TYPE=ENGINEERING CONSTANTS` — nine values
+in the order `E1, E2, E3, nu12, nu13, nu23, G12, G13` on the first line and
+`G23` on the second — together with `*ORIENTATION` for the per-element raster
+frame. (`TYPE=ORTHOTROPIC` takes the nine stiffness-matrix terms instead, which
+is the less convenient input here.) Strecs3D's `MaterialSetter.cpp` is a working
+reference for the card; see `reference-implementations.md` §3bis.
 
 **Gate — and this is the one that matters:**
 

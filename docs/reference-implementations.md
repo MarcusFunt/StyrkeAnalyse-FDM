@@ -47,6 +47,7 @@ FEniCS split.
 | DIC + identification | [pyxel](https://github.com/jcpassieux/pyxel) | CeCILL | 12 725 | 4–6 d |
 | DIC (subset) | [muDIC](https://github.com/PolymerGuy/muDIC) | MIT | 4 656 | 2–4 d |
 | XFEM | *(nothing usable in this stack)* | — | — | do not attempt |
+| CalculiX deck writing | [Strecs3D](https://github.com/tomohiron907/Strecs3D) `FEM/` | BSD-3 | 1 752 | 1–2 d (read, port) |
 
 ### Supporting and adjacent tools
 
@@ -247,6 +248,130 @@ This is not a gap to fill by hand. VOLCO generates the bead geometry *physically
 from the actual toolpath, including inter-bead voids, which is better evidence
 than a parametric idealisation of what you assume a bead cross-section looks
 like. Generate, don't idealise.
+
+---
+
+## 3bis. Three FDM-specific tools, assessed
+
+These came up as candidates after the main survey. All three were cloned and
+inspected. Verdicts differ sharply, so they are worth recording individually.
+
+### Strecs3D — keep, for its CalculiX pipeline
+
+[Strecs3D](https://github.com/tomohiron907/Strecs3D), BSD-3-Clause, C++
+(90 headers, 72 source files), Qt GUI with Windows and macOS installers.
+
+**What it is for is not what this project needs.** Strecs3D reads a stress field
+from a VTK file, segments the model by stress threshold, assigns dense infill
+where stress is high and sparse infill where it is low, and exports a 3MF for
+Cura or Bambu Studio. That is design optimisation, not validation.
+
+**But its `FEM/` subdirectory is directly useful** — 1 752 lines implementing a
+complete, working CalculiX automation pipeline:
+
+| File | Lines | Does |
+| --- | --- | --- |
+| `fem_pipeline.cpp` | 494 | Orchestration; locates and invokes a bundled `ccx` |
+| `step2inp/LoadConditionSetter.cpp` | 207 | Load application |
+| `frd2vtu.cpp` | 204 | CalculiX `.frd` results → VTU for ParaView |
+| `step2inp/MeshGenerator.cpp` | 95 | Meshing |
+| `step2inp/MaterialManager.cpp` | 91 | Material library, isotropic and orthotropic |
+| `step2inp/MaterialSetter.cpp` | 72 | Writes the material cards |
+| `step2inp/InpWriter.cpp` | 70 | Deck assembly |
+| `step2inp/ConstraintSetter.cpp` | 58 | Boundary conditions |
+
+It supports orthotropic materials and writes this card:
+
+```
+*ELASTIC, TYPE=ENGINEERING CONSTANTS
+** E1, E2, E3, nu12, nu13, nu23, G12, G13
+<eight values>
+** G23
+<ninth value>
+```
+
+That is the exact syntax and ordering the M5 CalculiX arm needs, including the
+line-break convention — eight constants on the first line, `G23` alone on the
+second. Getting that ordering wrong is a classic silent error that produces a
+plausible-looking wrong answer, so having a working reference is worth more than
+its size suggests.
+
+Two limitations to note before copying: it writes no `*ORIENTATION`, so the
+material frame is global rather than per-element — raster-angle work needs that
+added. And `MaterialManager.cpp` fills the orthotropic fields with isotropic
+values as a fallback, so the orthotropic path is not necessarily exercised.
+
+**There is also a framing argument here.** Strecs3D is the *inverse* of this
+project: it takes anisotropic FEA as trustworthy and uses it to make design
+decisions about infill. Whether that underlying prediction is actually accurate
+is precisely what this SOP sets out to test. Tools of this kind ship to users
+today on an unvalidated assumption, which is a concrete motivation for the work
+and worth a sentence in the introduction.
+
+### PrintFEA — read the feature list, nothing else is available
+
+[PrintFEA](https://github.com/SixtyAteWhiskey/PrintFEA) is a FreeCAD workbench
+wrapping FreeCAD FEM, Gmsh and CalculiX for FDM parts — on paper, almost exactly
+the M5 stack.
+
+**The repository contains no source code.** Cloned, it holds four files:
+`README.md`, `CHANGELOG.md` and two screenshots. The code ships only as a
+release zip (`PrintFEA-v0.6.2-install.zip`). There is no `LICENSE` file, which
+means all rights reserved. The README openly states the tool was built with
+ChatGPT, with the author doing the validation testing — an honest disclosure,
+and the reason it is mentioned here rather than quietly skipped.
+
+So: nothing to read, nothing to verify, nothing to cite as an implementation.
+Its value is as a **feature-set reference** — what a guided FDM screening tool
+chooses to expose (build-direction-aligned orthotropic material, wall/infill
+shell-core estimation from real cross-sections, directional utilisation heat
+maps, per-material conservative profiles).
+
+One detail is worth noting as independent corroboration: it ships a *"PrintFEA
+Validation Material"*, an isotropic profile whose stated purpose is checking the
+solver against analytical solutions. That is the same verification-before-
+validation discipline this roadmap argues for in §3.1, arrived at separately.
+Its own README also calls the tool "screening, not engineering certification"
+and its filament profiles "conservative generic approximations" — which is the
+correct disclaimer and reinforces why this project measures its own constants.
+
+### fdm-print-failure-analysis — not usable as data
+
+[fdm-print-failure-analysis](https://github.com/gn3dstudio/fdm-print-failure-analysis),
+MIT. Not software: the repository is one Python parsing example, two CSV files,
+and documentation.
+
+The interesting file is `datasets/moisture_vs_tensile.csv` — Z-axis tensile
+strength against filament moisture content, for PA6-GF25, Nylon-CF30, PETG and
+PLA. Z-axis strength is exactly what this project needs. **It cannot be used**,
+and the reasons are worth stating precisely, because they are the same criteria
+§3.3 applies to your own campaign:
+
+- **Five rows per material, each a single value.** No replicates, no standard
+  deviation, no coefficient of variation.
+- **No specimen standard** — no ISO 527, no ASTM D638, no geometry, no gauge
+  length.
+- **No print parameters, no test speed, no equipment**, and no stated method for
+  measuring moisture content (gravimetric? Karl Fischer?).
+- **Every column declines perfectly monotonically in lockstep** — strength,
+  elongation and a subjective surface rating all falling together at every step,
+  with no scatter anywhere.
+
+Real FDM tensile data runs 5–15 % CoV. This has none. A grep for `specimen`,
+`ISO`, `ASTM`, `replicate`, `standard deviation` or `method` across the README
+and docs returns nothing.
+
+Absence of documented method is not proof that data was fabricated, and this is
+not an accusation. But for calibration the distinction does not matter:
+undocumented data is unusable either way, and by the roadmap's own acceptance
+criteria it would be rejected if you had produced it yourself. Treat the
+qualitative claim — moisture degrades interlayer strength, dry your filament —
+as a known and well-established effect, and cite the literature for it rather
+than this file.
+
+It is, however, a useful negative example for the SOP's source-criticism
+section: a dataset that looks quantitative, is MIT-licensed and carries a
+`CITATION.cff`, and still fails every test for usable experimental evidence.
 
 ---
 
