@@ -93,12 +93,19 @@ scripts/               Reproducible verification commands
 `docs/roadmap-first-accurate-results.md` audits the current implementation and
 sets out the critical path to a first validated prediction, including the
 verification gates that must pass before any comparison against measurements.
+It is written against the project's 86-entry source review and maps each step
+back to its references.
 
-1. Define specimen YAML files and the canonical `ToolpathModel` data schema.
-2. Implement and test a G-code normaliser for one controlled slicer profile.
-3. Add M0 analytical tensile and three-point-bend predictions.
-4. Add a simple DOLFINx isotropic baseline and a CalculiX cross-check.
-5. Add orthotropic calibration coupons before attempting local G-code fields.
+1. Declare a unit convention, the canonical data schema and a provenance record.
+2. Add analytical tensile and three-point-bend reductions as the solver oracle.
+3. Add classical laminate theory as the cheap anisotropic stiffness baseline.
+4. Print and test the full specimen matrix: elastic and strength coupons,
+   notched fracture specimens, and interlayer DCB.
+5. Add a DOLFINx isotropic baseline with a CalculiX cross-check, behind an
+   explicit verification gate.
+6. Add the orthotropic model and failure index, then the fracture tier.
+7. Compare G-code-derived material fields against CAD geometry as a controlled
+   experiment, not as an assumed improvement.
 
-The printed calibration coupons are the schedule driver, so start that campaign
-alongside the software work rather than after it.
+The printed specimens are the schedule driver, so design the whole matrix and
+start that campaign alongside the software work rather than after it.
