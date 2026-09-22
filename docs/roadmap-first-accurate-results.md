@@ -10,7 +10,10 @@ such as [17] refer to that list; §10 maps each milestone back to its sources.
 
 For the existing open-source implementations behind most of these milestones —
 what each one contains, its licence, and a measured estimate of the work to
-adopt it — see `reference-implementations.md`.
+adopt it — see `reference-implementations.md`. Those projects span three
+mutually incompatible FEniCS versions, so each runs in its own container;
+`execution-environments.md` covers that split and the data contract between
+stages.
 
 ---
 
@@ -281,14 +284,18 @@ the next milestone until the gate is green.
   CalculiX practice. Whatever you choose, make conversions explicit at the
   boundaries and never inside the solver layer.
 - `fdm_strength/schema.py` — pydantic models for `Specimen`, `MaterialProfile`,
-  `PrintProfile`, `TestRun`, `ToolpathModel`, `SimulationResult`. These are the
-  contract the rest of the project is written against; getting them right is
-  cheap now and expensive in M5.
+  `PrintProfile`, `TestRun`, `ToolpathModel`, `SimulationResult`, each carrying a
+  `schema_version`. These are not an internal convenience: because stages run in
+  separate containers, they are the published interface between processes.
+  Getting them right is cheap now and expensive in M5.
 - `fdm_strength/provenance.py` — a record capturing, at minimum:
-  git commit and dirty flag; container image **digest**; hash of `uv.lock`;
-  SHA-256 of every input (STL, G-code, slicer profile, experimental data file);
-  mesh parameters and mesh hash; material profile id and hash; solver name and
-  version; boundary-condition set id; timestamp; hash of the result file.
+  git commit and dirty flag; **the image digest of every stage that ran**; hash
+  of `uv.lock`; SHA-256 of every input (STL, G-code, slicer profile,
+  experimental data file); mesh parameters and mesh hash; material profile id
+  and hash; solver name and version; MPI rank count and thread counts;
+  boundary-condition set id; timestamp; hash of the result file.
+  Because the pipeline runs as a chain of single-purpose containers, this is a
+  list of stages rather than one record — see `execution-environments.md` §4.
 - Pin `DOLFINX_IMAGE` to a digest in `.env` and record it.
 - Fix the `.gitignore` negations and make `inspect` emit a SHA-256.
 
