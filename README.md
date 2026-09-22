@@ -94,7 +94,9 @@ scripts/               Reproducible verification commands
 sets out the critical path to a first validated prediction, including the
 verification gates that must pass before any comparison against measurements.
 It is written against the project's 86-entry source review and maps each step
-back to its references.
+back to its references. `docs/reference-implementations.md` covers the existing
+open-source projects each milestone can build on, with licences and measured
+effort estimates.
 
 1. Declare a unit convention, the canonical data schema and a provenance record.
 2. Add analytical tensile and three-point-bend reductions as the solver oracle.

@@ -8,6 +8,10 @@ It is written against commit `0269782` (branch `main`) and against the project's
 source review (`Kilder – alle kilder med metoder`, 86 entries). Bracketed numbers
 such as [17] refer to that list; §10 maps each milestone back to its sources.
 
+For the existing open-source implementations behind most of these milestones —
+what each one contains, its licence, and a measured estimate of the work to
+adopt it — see `reference-implementations.md`.
+
 ---
 
 ## 1. Where the implementation actually stands
