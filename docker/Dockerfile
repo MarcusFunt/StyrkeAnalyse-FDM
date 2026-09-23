@@ -42,8 +42,10 @@ RUN apt-get update \
 WORKDIR /opt/project
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
+COPY docker/jupyter-requirements.txt /tmp/jupyter-requirements.txt
 RUN uv venv --system-site-packages --python python3 /opt/venv \
     && uv sync --frozen --all-groups \
+    && uv pip install --python /opt/venv/bin/python --requirement /tmp/jupyter-requirements.txt \
     && chown -R "${USER_UID}:${USER_GID}" /opt/venv
 
 WORKDIR /workspaces/styrkeanalyse-fdm
