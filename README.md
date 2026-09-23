@@ -7,16 +7,17 @@ G-code-informed material fields against measurements from printed specimens.
 
 ## What is implemented now
 
-This first commit establishes a reproducible numerical environment rather than
-pretending that a fracture solver already exists:
+The project currently has three local development environments:
 
-- DOLFINx/PETSc/MPI is the primary programmable FEM environment.
-- CalculiX is installed as an independent reference solver.
-- Gmsh provides mesh creation and the Python Gmsh API.
-- `uv.lock` pins the ordinary Python analysis dependencies.
-- Docker Compose and a VS Code Dev Container provide one canonical development
-  environment for Windows + WSL2 users.
-- `scripts/verify-environment.sh` verifies the scientific stack and runs tests.
+- `analysis` provides Python 3.12, scientific Python, JupyterLab, and the
+  solver-independent test suite.
+- `fenicsx` provides DOLFINx/PETSc/MPI, CalculiX, Gmsh, and JupyterLab.
+- `rve` provides Python 3.10 and JupyterLab as an extension point for future
+  voxel and homogenisation work. It does not currently contain VOLCO or fedoo.
+
+`uv.lock` pins the ordinary project dependencies. The notebook services mount
+the working tree for development; formal simulation runs must use baked images
+and record their provenance.
 
 The physical tensile/bending-rig data acquisition is intentionally outside the
 container. It should write files such as CSV or Parquet; calibration and
@@ -30,26 +31,56 @@ the simulation provenance; it is not needed to establish the core FEM runtime.
 ## Quick start: Windows + WSL2
 
 1. Install Docker Desktop with the WSL2 backend, then install the VS Code
-   **Dev Containers** extension.
+   **Dev Containers** extension if you want to use the FEniCSx Dev Container.
 2. Clone the repository into the WSL filesystem (for example
    `~/projects/StyrkeAnalyse-FDM`), not under `/mnt/c`.
-3. In the WSL terminal, run:
+3. In the WSL terminal, configure a Jupyter token and local user IDs:
 
    ```bash
+   cp .env.example .env
+   # Replace the example value with a long random token before starting Jupyter.
    export LOCAL_UID="$(id -u)"
    export LOCAL_GID="$(id -g)"
-   docker compose build
-   docker compose run --rm dev scripts/verify-environment.sh
    ```
 
-4. Open the repository in VS Code and choose **Dev Containers: Reopen in
-   Container**. The post-create step repeats the environment verification.
+   Compose fails with an actionable error if `JUPYTER_TOKEN` is unset. The
+   host ports are published only on `127.0.0.1`.
 
-For interactive shell access:
+Build and start only the environment you need. Each `up` command runs the
+server in the foreground; open its local URL and enter the token from `.env`:
 
 ```bash
-docker compose run --rm dev bash
-fdm-strength info
+docker compose build analysis
+docker compose up analysis       # http://localhost:8888
+
+docker compose build fenicsx
+docker compose up fenicsx        # http://localhost:8889
+
+docker compose build rve
+docker compose up rve            # http://localhost:8890
+```
+
+Run the solver-independent tests in `analysis` and verify the solver stack in
+`fenicsx` with:
+
+```bash
+docker compose run --rm analysis pytest -q
+docker compose run --rm fenicsx scripts/verify-environment.sh
+```
+
+The RVE service currently supplies Python 3.10 plus JupyterLab only. VOLCO,
+fedoo, fibergen, and other specialised RVE tools have not been installed.
+Jupyter notebooks are a development interface, not formal simulation runs.
+For a notebook result to be reproducible, restart its kernel and run every cell
+from top to bottom.
+
+```bash
+docker compose build analysis
+docker compose run --rm analysis python -c "import numpy, scipy; print(numpy.__version__)"
+docker compose build rve
+docker compose run --rm rve python -c "import sys; assert sys.version_info[:2] == (3, 10)"
+docker compose build fenicsx
+docker compose run --rm fenicsx scripts/verify-environment.sh
 ```
 
 ## Reproducibility rule

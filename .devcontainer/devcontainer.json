@@ -1,11 +1,12 @@
 {
   "name": "StyrkeAnalyse-FDM",
   "dockerComposeFile": "../compose.yaml",
-  "service": "dev",
+  "service": "fenicsx",
+  "runServices": ["fenicsx"],
   "workspaceFolder": "/workspaces/styrkeanalyse-fdm",
   "remoteUser": "fdm",
   "overrideCommand": false,
-  "postCreateCommand": "uv sync --frozen --all-groups && scripts/verify-environment.sh",
+  "postCreateCommand": "uv sync --frozen --all-groups && uv pip install --python /opt/venv/bin/python --requirement docker/jupyter-requirements.txt && scripts/verify-environment.sh",
   "customizations": {
     "vscode": {
       "extensions": [

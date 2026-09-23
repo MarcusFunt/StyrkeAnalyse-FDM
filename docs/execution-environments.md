@@ -8,6 +8,22 @@ This document records the image split, the data contract between stages, what
 that means for provenance, and an honest assessment of which orchestrator is
 worth the trouble.
 
+## Current implementation status
+
+Compose currently provides exactly three source-mounted local development
+environments:
+
+| Service | Status and contents |
+| --- | --- |
+| `analysis` | Implemented: Python 3.12, scientific Python, JupyterLab, and ordinary package tests. |
+| `fenicsx` | Implemented: the existing DOLFINx/PETSc/MPI, Gmsh, and CalculiX stack plus JupyterLab. |
+| `rve` | Implemented: Python 3.10 and JupyterLab only; VOLCO, fedoo, and fibergen are not installed. |
+
+These services are for interactive development. Their source mounts do not
+meet the formal simulation reproducibility rule below. The separate image
+families for voxel processing, homogenisation, DIC, and legacy FEniCS remain
+deferred until their dependencies and use cases are evaluated.
+
 ---
 
 ## 1. Why the dependency conflicts are real
@@ -43,14 +59,15 @@ forced.
 One image per experiment would mean rebuilding for every parameter sweep. What
 actually varies is the *dependency set*, and there are six of those:
 
-| Image | Contains | Used by |
+| Family | Status | Contains / purpose |
 | --- | --- | --- |
-| `fdm-analysis` | Python + project package only; no solver | M1 analytical, M2 CLT, M3 data reduction, plots, **CI** |
-| `fdm-core` | DOLFINx 0.11 + PETSc/MPI + Gmsh + CalculiX + PhaseFieldX | M4, M5, M6 (J-integral, CZM, isotropic phase-field) |
-| `fdm-voxel` | Python 3.10 + VOLCO + ciclope + meshio | M7 G-code → voxels → `.inp`/STL |
-| `fdm-homog` | fedoo (+ simcoon), or fibergen | RVE → effective 6×6 |
-| `fdm-dic` | muDIC + pyxel + VTK | DIC and identification |
-| `fdm-legacy-pf` | FEniCS 2019.1 + anisotropic phase-field | M6 anisotropic arm **only if pursued** |
+| `analysis` (`fdm-analysis`) | Implemented development environment | Python + scientific packages and Jupyter; no solver. |
+| `fenicsx` (`fdm-core`) | Implemented development environment | Existing DOLFINx + PETSc/MPI + Gmsh + CalculiX, with Jupyter. |
+| `rve` | Implemented development environment | Python 3.10 + Jupyter only; no VOLCO, fedoo, or fibergen. |
+| `fdm-voxel` | Deferred | Python 3.10 + VOLCO + ciclope + meshio for G-code → voxels → `.inp`/STL. |
+| `fdm-homog` | Deferred | fedoo (+ simcoon), or fibergen for RVE → effective 6×6. |
+| `fdm-dic` | Deferred | muDIC + pyxel + VTK for DIC and identification. |
+| `fdm-legacy-pf` | Deferred; conditional | FEniCS 2019.1 + anisotropic phase-field, only if pursued. |
 
 Notes on the split:
 
@@ -158,8 +175,10 @@ Three details that are easy to miss and expensive later:
 
    ```yaml
    services:
-     dev:   # bind-mounts source, for editing
-     run:   # no source mount, code baked in, for results
+     analysis: # bind-mounts source, for editing
+     fenicsx:  # bind-mounts source, for editing
+     rve:      # bind-mounts source, for editing
+     run:      # no source mount, code baked in, for results
    ```
 
    This is the mechanism that actually enforces the README's reproducibility
@@ -231,21 +250,19 @@ cost against the part being graded.
 
 ---
 
-## 7. What to change in the repository
+## 7. Remaining repository work
 
 In rough order:
 
-1. Split `compose.yaml` into `dev` (bind-mounted, for editing) and `run`
-   (code baked in, data-only mounts).
-2. Pin `DOLFINX_IMAGE` to a digest — already required by roadmap §1.3.
-3. Define the stage CLI contract (`--spec /work/run.json`, `/work/in`,
+1. Define the stage CLI contract (`--spec /work/run.json`, `/work/in`,
    `/work/out`) and add `schema_version` to the pydantic models in M0.
-4. Extend `provenance.py` to the per-stage record in §4, including `mpi_ranks`
+2. Pin `DOLFINX_IMAGE` to a digest — already required by roadmap §1.3.
+3. Extend `provenance.py` to the per-stage record in §4, including `mpi_ranks`
    and `omp_threads`.
-5. Build `fdm-analysis` and `fdm-core` first; add `fdm-voxel` when M7 starts.
-6. Add a `Makefile` with one target per stage, so the orchestrator is a
+4. Evaluate and pin dependencies before building any deferred image family.
+5. Add a `Makefile` with one target per stage, so the orchestrator is a
    one-line change later.
-7. Revisit Kubernetes when either a cluster or a real sweep exists.
+6. Revisit Kubernetes when either a cluster or a real sweep exists.
 
-The Dockerfile sketches implied above have not been built or tested in this
-environment — treat them as a plan, not a working configuration.
+The three local development images are implemented. Formal result runs still
+need the baked-image and data-only mount workflow described above.

@@ -1,27 +1,66 @@
 name: styrkeanalyse-fdm
 
 services:
-  dev:
+  analysis:
     build:
       context: .
-      dockerfile: docker/Dockerfile
+      dockerfile: docker/analysis.Dockerfile
       args:
-        # Pin this to a release tag once the environment has been accepted for
-        # a report dataset. `stable` is convenient while the project is young.
-        DOLFINX_IMAGE: ${DOLFINX_IMAGE:-ghcr.io/fenics/dolfinx/dolfinx:stable}
         USER_UID: ${LOCAL_UID:-1000}
         USER_GID: ${LOCAL_GID:-1000}
-    image: styrkeanalyse-fdm:dev
+    image: styrkeanalyse-fdm:analysis
     init: true
     working_dir: /workspaces/styrkeanalyse-fdm
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     volumes:
       - .:/workspaces/styrkeanalyse-fdm:cached
     environment:
-      # Open MPI is intentionally allowed to use all allocated CPU cores.
-      # Override this in .env for an explicit experiment limit.
-      OMP_NUM_THREADS: ${OMP_NUM_THREADS:-1}
-      PYVISTA_OFF_SCREEN: "true"
+      JUPYTER_TOKEN: ${JUPYTER_TOKEN:?set JUPYTER_TOKEN in .env}
+    ports: ["127.0.0.1:8888:8888"]
     stdin_open: true
     tty: true
-    command: sleep infinity
+    command: ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--ServerApp.token=${JUPYTER_TOKEN:?set JUPYTER_TOKEN in .env}"]
+
+  fenicsx:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        DOLFINX_IMAGE: ${DOLFINX_IMAGE:-ghcr.io/fenics/dolfinx/dolfinx:stable}
+        USER_UID: ${LOCAL_UID:-1000}
+        USER_GID: ${LOCAL_GID:-1000}
+    image: styrkeanalyse-fdm:fenicsx
+    init: true
+    working_dir: /workspaces/styrkeanalyse-fdm
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    volumes:
+      - .:/workspaces/styrkeanalyse-fdm:cached
+    environment:
+      JUPYTER_TOKEN: ${JUPYTER_TOKEN:?set JUPYTER_TOKEN in .env}
+      OMP_NUM_THREADS: ${OMP_NUM_THREADS:-1}
+      PYVISTA_OFF_SCREEN: "true"
+      PYTHONPATH: /workspaces/styrkeanalyse-fdm/src
+    ports: ["127.0.0.1:8889:8888"]
+    stdin_open: true
+    tty: true
+    command: ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--ServerApp.token=${JUPYTER_TOKEN:?set JUPYTER_TOKEN in .env}"]
+
+  rve:
+    build:
+      context: .
+      dockerfile: docker/rve.Dockerfile
+      args:
+        USER_UID: ${LOCAL_UID:-1000}
+        USER_GID: ${LOCAL_GID:-1000}
+    image: styrkeanalyse-fdm:rve
+    init: true
+    working_dir: /workspaces/styrkeanalyse-fdm
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    volumes:
+      - .:/workspaces/styrkeanalyse-fdm:cached
+    environment:
+      JUPYTER_TOKEN: ${JUPYTER_TOKEN:?set JUPYTER_TOKEN in .env}
+    ports: ["127.0.0.1:8890:8888"]
+    stdin_open: true
+    tty: true
+    command: ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--ServerApp.token=${JUPYTER_TOKEN:?set JUPYTER_TOKEN in .env}"]
