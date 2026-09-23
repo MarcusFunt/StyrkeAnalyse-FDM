@@ -107,6 +107,7 @@ git commit -m "feat: add isolated notebook Compose services"
 **Files:**
 - Create: `docker/analysis.Dockerfile`
 - Create: `docker/rve.Dockerfile`
+- Create: `docker/jupyter-requirements.txt`
 - Modify: `docker/Dockerfile`
 - Test: `scripts/verify-environment.sh`
 
@@ -135,13 +136,20 @@ Expected: FAIL because their Dockerfiles do not exist.
 
 - [ ] **Step 3: Implement exact image responsibilities**
 
-Create `docker/analysis.Dockerfile` from `python:3.12-slim-bookworm` and `docker/rve.Dockerfile` from `python:3.10-slim-bookworm`. Both must:
-1. create the `fdm` user from `USER_UID` and `USER_GID`;
-2. install exact JupyterLab and Matplotlib versions through an image-local requirements file;
-3. use `/workspaces/styrkeanalyse-fdm` as their working directory; and
-4. contain no FEM, VOLCO, or legacy FEniCS install.
+Create `docker/jupyter-requirements.txt` with these exact direct requirements:
 
-Update `docker/Dockerfile` to install the same JupyterLab version in the existing `/opt/venv` after its frozen project sync. Keep its DOLFINx and CalculiX verification imports unchanged.
+```text
+jupyterlab==4.4.10
+ipykernel==6.30.1
+matplotlib==3.10.7
+pytest==8.4.2
+numpy==2.2.6
+scipy==1.15.3
+```
+
+Create `docker/analysis.Dockerfile` from `python:3.12-slim-bookworm` and `docker/rve.Dockerfile` from `python:3.10-slim-bookworm`. Both must create the `fdm` user from `USER_UID` and `USER_GID`, copy and install `docker/jupyter-requirements.txt`, use `/workspaces/styrkeanalyse-fdm` as their working directory, and contain no FEM, VOLCO, or legacy FEniCS install.
+
+Update `docker/Dockerfile` to copy the same requirements file and install it into the existing `/opt/venv` after its frozen project sync. Keep its DOLFINx and CalculiX verification imports unchanged.
 
 - [ ] **Step 4: Build and run image smoke commands**
 
@@ -158,7 +166,7 @@ Expected: every command exits zero; only `fenicsx` runs `scripts/verify-environm
 - [ ] **Step 5: Commit**
 
 ```bash
-git add docker/analysis.Dockerfile docker/rve.Dockerfile docker/Dockerfile
+git add docker/analysis.Dockerfile docker/rve.Dockerfile docker/jupyter-requirements.txt docker/Dockerfile
 git commit -m "feat: add analysis and RVE notebook images"
 ```
 
