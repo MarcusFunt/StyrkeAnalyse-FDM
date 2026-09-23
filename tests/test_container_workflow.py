@@ -31,4 +31,24 @@ def test_fenicsx_sync_restores_jupyter_and_devcontainer_runs_only_fenicsx():
 def test_fenicsx_notebooks_import_the_mounted_project_source():
     compose = (ROOT / "compose.yaml").read_text()
     fenicsx = compose.split("  fenicsx:", 1)[1].split("  rve:", 1)[0]
-    assert "PYTHONPATH: /workspaces/styrkeanalyse-fdm/src" in fenicsx
+    dockerfile = (ROOT / "docker/Dockerfile").read_text()
+    assert "ENV PYTHONPATH=/workspaces/styrkeanalyse-fdm/src:${PYTHONPATH}" in dockerfile
+    assert "PYTHONPATH:" not in fenicsx
+
+
+def test_fenicsx_image_reuses_the_base_account_when_uid_already_exists():
+    dockerfile = (ROOT / "docker/Dockerfile").read_text()
+    assert 'getent passwd "${USER_UID}"' in dockerfile
+    assert 'usermod --login "${USERNAME}"' in dockerfile
+
+
+def test_fenicsx_venv_uses_the_base_dolfinx_interpreter():
+    dockerfile = (ROOT / "docker/Dockerfile").read_text()
+    assert "uv venv --system-site-packages --python /dolfinx-env/bin/python /opt/venv" in dockerfile
+    assert 'base_site_packages="$(/dolfinx-env/bin/python -c' in dockerfile
+    assert "dolfinx-env.pth" in dockerfile
+
+
+def test_linux_environment_script_keeps_lf_line_endings_on_windows_checkouts():
+    script = ROOT / "scripts/verify-environment.sh"
+    assert b"\r\n" not in script.read_bytes()
