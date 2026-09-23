@@ -1,7 +1,7 @@
 {
   "name": "StyrkeAnalyse-FDM",
   "dockerComposeFile": "../compose.yaml",
-  "service": "dev",
+  "service": "fenicsx",
   "workspaceFolder": "/workspaces/styrkeanalyse-fdm",
   "remoteUser": "fdm",
   "overrideCommand": false,
