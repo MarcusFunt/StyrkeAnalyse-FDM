@@ -22,6 +22,11 @@ RUN groupadd --system --gid 10001 gui \
     && mkdir -p /data \
     && chown gui:gui /data
 
+# Keep aligned with the exact Pydantic version in uv.lock; the GUI uses it to
+# validate saved campaign workspaces without installing the solver stack.
+ARG PYDANTIC_VERSION=2.13.5
+RUN python -m pip install --no-cache-dir "pydantic==${PYDANTIC_VERSION}"
+
 COPY src/fdm_strength/ /app/src/fdm_strength/
 COPY --from=frontend-build /build/dist/ /app/frontend/dist/
 

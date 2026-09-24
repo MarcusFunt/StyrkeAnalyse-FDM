@@ -33,5 +33,25 @@ jobs:
         run: npm test --prefix frontend
       - name: Build frontend
         run: npm run build --prefix frontend
+      - name: Install Playwright Chromium
+        run: npx --prefix frontend playwright install --with-deps chromium
+      - name: Run browser, mobile, and accessibility checks
+        run: npm run test:e2e --prefix frontend
       - name: Build desktop GUI image
         run: docker build -f docker/gui.Dockerfile -t styrkeanalyse-fdm:gui-ci .
+      - name: Start desktop GUI image and check health endpoint
+        run: |
+          set -euo pipefail
+          container=fdm-gui-smoke
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          docker run -d --name "$container" -p 127.0.0.1:18010:8000 styrkeanalyse-fdm:gui-ci
+          for attempt in {1..20}; do
+            health=$(docker inspect --format '{{.State.Health.Status}}' "$container")
+            if [[ "$health" == "healthy" ]]; then
+              curl --fail --silent http://127.0.0.1:18010/api/health
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs "$container"
+          exit 1

@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
 
-
 ROOT = Path(__file__).parents[1]
 
 
@@ -57,9 +56,9 @@ def test_linux_environment_script_keeps_lf_line_endings_on_windows_checkouts():
 def test_gui_service_stores_studies_and_is_loopback_only():
     compose = (ROOT / "compose.yaml").read_text()
     gui = compose.split("  gui:", 1)[1].split("\nvolumes:", 1)[0]
-    assert '127.0.0.1:8010:8000' in gui
-    assert 'gui_data:/data' in gui
-    assert 'restart: unless-stopped' in gui
+    assert "127.0.0.1:8010:8000" in gui
+    assert "gui_data:/data" in gui
+    assert "restart: unless-stopped" in gui
 
     dockerfile = (ROOT / "docker/gui.Dockerfile").read_text()
     assert "npm ci" in dockerfile

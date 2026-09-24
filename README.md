@@ -18,6 +18,20 @@ The project currently has three local development environments:
   study workspaces on the desktop host. It can be shared privately over
   Tailscale Serve while remaining bound to host loopback.
 
+The GUI workflow imports tensile CSV/TSV files, validates column mappings and
+specimen dimensions, and stores a versioned campaign/specimen record with test,
+print, sensor, compliance, and input-file hash metadata. It computes a nominal
+tensile baseline and a chord modulus per eligible physical specimen, then shows
+mean, sample standard deviation, coefficient of variation, and the five-specimen
+campaign-readiness check. Desktop saves use revisions to detect conflicting
+edits; deleted studies can be restored during the selected retention period.
+
+Solver-independent reference modules now cover tensile and three-point-bend
+formulas, classical laminate theory, transversely isotropic stiffness and
+failure-index calculations, plus analytical fracture conversions and a
+bilinear cohesive envelope. These are calculation references with unit tests;
+they are not validated simulation models.
+
 `uv.lock` pins the ordinary project dependencies. The notebook services mount
 the working tree for development; formal simulation runs must use baked images
 and record their provenance.
@@ -134,12 +148,13 @@ start when you sign in. Compose uses `restart: unless-stopped`, so the GUI
 container comes back when Docker starts. If the desktop is asleep or powered
 off, remote access is unavailable.
 
-This release runs the tensile baseline analysis and stores saved workspaces on
-the desktop. It does not yet submit or monitor FEM simulation jobs; the current
-FEniCSx notebooks remain a development workflow. The GUI itself does not use
-the GPU, and the existing Compose configuration does not pass a GPU through to
-the FEM container. GPU acceleration needs a compatible solver build and will
-be configured when that backend is selected.
+This release runs tensile baseline and replicate reduction workflows and stores
+saved workspaces on the desktop. It does not submit or monitor FEM simulation
+jobs. The solver verification gate is intentionally red until pinned DOLFINx
+and CalculiX images produce recorded convergence, patch-test, analytical
+agreement, and cross-solver evidence. FEM-versus-experiment comparison is not
+available before then. The GUI itself does not use the GPU, and the existing
+Compose configuration does not pass a GPU through to the FEM container.
 
 ## Reproducibility rule
 
@@ -190,15 +205,19 @@ mutually incompatible dependency sets are split across containers.
 `docs/glossary.md` explains the terminology all three use, with a compact
 lookup table at the end.
 
-1. Declare a unit convention, the canonical data schema and a provenance record.
-2. Add analytical tensile and three-point-bend reductions as the solver oracle.
-3. Add classical laminate theory as the cheap anisotropic stiffness baseline.
-4. Print and test the full specimen matrix: elastic and strength coupons,
-   notched fracture specimens, and interlayer DCB.
-5. Add a DOLFINx isotropic baseline with a CalculiX cross-check, behind an
-   explicit verification gate.
-6. Add the orthotropic model and failure index, then the fracture tier.
-7. Compare G-code-derived material fields against CAD geometry as a controlled
+1. Pin and record immutable DOLFINx and CalculiX images; run all four M4
+   verification gates and retain their artifacts.
+2. Finalize the specimen matrix and collect at least five specimens per
+   configuration, including 0°, 90°, upright Z, held-out bend, notched, and DCB
+   specimens according to the planned modeling tiers.
+3. Implement the isotropic solver and cross-check it against the analytical and
+   CLT references before exposing any experiment comparison.
+4. Add orthotropic FEM, strength calibration, uncertainty, and a blinded held-out
+   bend prediction; only then assess validation.
+5. Add J-integral/LEFM and calibrated cohesive behavior after orthotropic
+   validation. Pursue phase-field only with mesh-objectivity evidence and the
+   required fracture data.
+6. Compare G-code-derived material fields against CAD geometry as a controlled
    experiment, not as an assumed improvement.
 
 The printed specimens are the schedule driver, so design the whole matrix and

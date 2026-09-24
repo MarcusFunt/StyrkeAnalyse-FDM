@@ -11,9 +11,11 @@ _DISPLACEMENT_TO_MM = {"mm": 1.0, "cm": 10.0}
 
 
 def _positive(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a finite positive number")
     try:
         number = float(value)
-    except (TypeError, ValueError) as error:
+    except (OverflowError, TypeError, ValueError) as error:
         raise ValueError(f"{name} must be a finite positive number") from error
     if not isfinite(number) or number <= 0:
         raise ValueError(f"{name} must be positive")
@@ -73,6 +75,8 @@ def analyze_tensile_rows(
     thickness = _positive(thickness_mm, "thickness_mm")
     gauge_length = _positive(gauge_length_mm, "gauge_length_mm")
     area = width * thickness
+    if not isfinite(area):
+        raise ValueError("cross-sectional area must be finite")
     force_scale = _FORCE_TO_NEWTONS[force_unit]
     displacement_scale = _DISPLACEMENT_TO_MM[displacement_unit]
     force_sign = 1.0 if tension_direction == "positive" else -1.0
@@ -96,13 +100,19 @@ def analyze_tensile_rows(
             initial_displacement = displacement_mm
         extension_mm = displacement_mm - initial_displacement
         stress_mpa = nominal_tensile_stress_mpa(force_n, area)
+        strain = extension_mm / gauge_length
+        if not all(
+            isfinite(value)
+            for value in (force_n, displacement_mm, extension_mm, strain, stress_mpa)
+        ):
+            raise ValueError(f"row {row_number} overflows the supported measurement range")
         points.append(
             {
                 "row_number": row_number,
                 "force_n": force_n,
                 "displacement_mm": displacement_mm,
                 "extension_mm": extension_mm,
-                "strain": extension_mm / gauge_length,
+                "strain": strain,
                 "stress_mpa": stress_mpa,
             }
         )
