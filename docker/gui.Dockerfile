@@ -18,7 +18,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 RUN groupadd --system --gid 10001 gui \
-    && useradd --system --uid 10001 --gid gui --home-dir /app gui \
+    && useradd --uid 10001 --gid gui --home-dir /app --no-create-home --shell /usr/sbin/nologin gui \
     && mkdir -p /data \
     && chown gui:gui /data
 
