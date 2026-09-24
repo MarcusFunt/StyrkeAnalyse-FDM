@@ -16,3 +16,6 @@ project_sources
 *.msh
 *.parquet
 *.csv
+frontend/node_modules
+frontend/dist
+frontend/*.tsbuildinfo

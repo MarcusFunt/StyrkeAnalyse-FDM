@@ -52,3 +52,23 @@ def test_fenicsx_venv_uses_the_base_dolfinx_interpreter():
 def test_linux_environment_script_keeps_lf_line_endings_on_windows_checkouts():
     script = ROOT / "scripts/verify-environment.sh"
     assert b"\r\n" not in script.read_bytes()
+
+
+def test_gui_service_stores_studies_and_is_loopback_only():
+    compose = (ROOT / "compose.yaml").read_text()
+    gui = compose.split("  gui:", 1)[1].split("\nvolumes:", 1)[0]
+    assert '127.0.0.1:8010:8000' in gui
+    assert 'gui_data:/data' in gui
+    assert 'restart: unless-stopped' in gui
+
+    dockerfile = (ROOT / "docker/gui.Dockerfile").read_text()
+    assert "npm ci" in dockerfile
+    assert "USER gui" in dockerfile
+    assert 'CMD ["python", "-m", "fdm_strength.web"]' in dockerfile
+
+
+def test_remote_desktop_instructions_use_tailnet_serve_without_exposing_other_ports():
+    readme = (ROOT / "README.md").read_text()
+    assert "tailscale serve --bg 8010" in readme
+    assert "Tailscale Funnel" in readme
+    assert "GPU" in readme

@@ -14,6 +14,9 @@ The project currently has three local development environments:
 - `fenicsx` provides DOLFINx/PETSc/MPI, CalculiX, Gmsh, and JupyterLab.
 - `rve` provides Python 3.10 and JupyterLab as an extension point for future
   voxel and homogenisation work. It does not currently contain VOLCO or fedoo.
+- `gui` serves the browser interface, runs the tensile baseline and stores saved
+  study workspaces on the desktop host. It can be shared privately over
+  Tailscale Serve while remaining bound to host loopback.
 
 `uv.lock` pins the ordinary project dependencies. The notebook services mount
 the working tree for development; formal simulation runs must use baked images
@@ -82,6 +85,61 @@ docker compose run --rm rve python -c "import sys; assert sys.version_info[:2] =
 docker compose build fenicsx
 docker compose run --rm fenicsx scripts/verify-environment.sh
 ```
+
+## Run the GUI on the home desktop
+
+The browser interface and its saved studies can run on an always-on desktop. Open
+it from a phone or laptop on your Tailscale network; the app itself is not
+published to the public internet.
+
+1. On the desktop, clone or update this repository and configure the existing
+   `.env` file as described above. Compose requires `JUPYTER_TOKEN` even when
+   starting only the GUI because the other notebook services are part of the
+   same Compose project.
+2. Build and start the GUI in the background:
+
+   ```bash
+   docker compose build gui
+   docker compose up -d gui
+   docker compose ps gui
+   docker compose logs -f gui
+   ```
+
+   The GUI listens on host loopback port 8010. Its saved studies are stored in
+   the persistent `gui_data` Docker volume. In the app, use **Save on desktop**
+   after importing a test to keep the measurements and results on the host;
+   **Export file** downloads a portable workspace to the device running the
+   browser.
+3. Install Tailscale on the desktop and sign it in to your tailnet. Install it
+   on your phone and laptop and sign those into the same tailnet. On the
+   operating system that runs Tailscale on the desktop, run:
+
+   ```bash
+   tailscale serve --bg 8010
+   tailscale serve status
+   ```
+
+   Serve prints the private HTTPS URL to open on the other devices. Tailscale
+   Serve requires HTTPS certificates to be enabled for the tailnet. For a
+   Windows + WSL2 setup, run Compose in WSL and run the Tailscale commands in
+   Windows, where Docker Desktop publishes port 8010.
+
+The Compose port stays bound to `127.0.0.1`; Tailscale Serve proxies it to
+approved devices on your tailnet. Do not change this to `0.0.0.0` and do not use
+Tailscale Funnel. Access follows your tailnet's access policy. The notebook
+ports 8888–8890 remain local-only and are not part of this GUI route.
+
+Set the desktop not to sleep while plugged in and configure Docker Desktop to
+start when you sign in. Compose uses `restart: unless-stopped`, so the GUI
+container comes back when Docker starts. If the desktop is asleep or powered
+off, remote access is unavailable.
+
+This release runs the tensile baseline analysis and stores saved workspaces on
+the desktop. It does not yet submit or monitor FEM simulation jobs; the current
+FEniCSx notebooks remain a development workflow. The GUI itself does not use
+the GPU, and the existing Compose configuration does not pass a GPU through to
+the FEM container. GPU acceleration needs a compatible solver build and will
+be configured when that backend is selected.
 
 ## Reproducibility rule
 
