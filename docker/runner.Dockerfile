@@ -24,6 +24,7 @@ COPY src/fdm_strength/run_models.py /app/src/fdm_strength/run_models.py
 COPY src/fdm_strength/run_store.py /app/src/fdm_strength/run_store.py
 COPY src/fdm_strength/runner.py /app/src/fdm_strength/runner.py
 COPY src/fdm_strength/runner_service.py /app/src/fdm_strength/runner_service.py
+COPY src/fdm_strength/study_models.py /app/src/fdm_strength/study_models.py
 COPY src/fdm_strength/stage_contract.py /app/src/fdm_strength/stage_contract.py
 
 LABEL org.opencontainers.image.revision=${GIT_COMMIT} \
