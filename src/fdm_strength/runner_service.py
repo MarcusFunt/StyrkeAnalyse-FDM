@@ -680,16 +680,32 @@ def _send_archive_to_work(
         workdir="/work",
     )
     transfer_socket = client.api.exec_start(created["Id"], tty=False, socket=True)
-    transfer_socket.settimeout(timeout_seconds)
+    set_timeout = getattr(transfer_socket, "settimeout", None)
+    if callable(set_timeout):
+        set_timeout(timeout_seconds)
     timer = threading.Timer(timeout_seconds, _kill_container, args=(container,))
     timer.daemon = True
     timer.start()
     try:
-        transfer_socket.sendall(archive)
-        try:
-            transfer_socket.shutdown(socket.SHUT_WR)
-        except (OSError, NotImplementedError):
-            pass
+        sendall = getattr(transfer_socket, "sendall", None)
+        if callable(sendall):
+            sendall(archive)
+        else:
+            write = getattr(transfer_socket, "write", None)
+            if not callable(write):
+                raise TypeError("Docker input stream does not support writing")
+            remaining = memoryview(archive)
+            while remaining:
+                written = write(remaining)
+                if not isinstance(written, int) or written <= 0:
+                    raise OSError("Docker input stream stopped accepting stage files")
+                remaining = remaining[written:]
+        shutdown = getattr(transfer_socket, "shutdown", None)
+        if callable(shutdown):
+            try:
+                shutdown(socket.SHUT_WR)
+            except (OSError, NotImplementedError):
+                pass
     finally:
         try:
             transfer_socket.close()

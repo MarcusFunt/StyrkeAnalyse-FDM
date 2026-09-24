@@ -11,7 +11,12 @@ from pydantic import ValidationError
 from fdm_strength.run_models import ArtifactReference, Run, StageRecord
 from fdm_strength.run_store import ArtifactStore, RunStore
 from fdm_strength.runner import create_runner_server
-from fdm_strength.runner_service import RunService, RunSubmission, StageExecution
+from fdm_strength.runner_service import (
+    RunService,
+    RunSubmission,
+    StageExecution,
+    _send_archive_to_work,
+)
 from fdm_strength.stage_contract import load_stage_contract
 
 
@@ -127,6 +132,46 @@ def test_stage_contract_fails_closed_on_modified_input(tmp_path):
 
     with pytest.raises(ValueError, match="digest mismatch"):
         load_stage_contract(tmp_path)
+
+
+def test_archive_transfer_supports_file_like_docker_sockets():
+    class FileLikeSocket:
+        def __init__(self):
+            self.received = bytearray()
+            self.closed = False
+
+        def write(self, content):
+            chunk = bytes(content[:3])
+            self.received.extend(chunk)
+            return len(chunk)
+
+        def close(self):
+            self.closed = True
+
+    class FakeDockerAPI:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def exec_create(self, *_args, **_kwargs):
+            return {"Id": "transfer-exec"}
+
+        def exec_start(self, *_args, **_kwargs):
+            return self.stream
+
+        def exec_inspect(self, _exec_id):
+            return {"ExitCode": 0, "Running": False}
+
+    class FakeContainer:
+        id = "stage-container"
+
+    payload = b"contract and source archive"
+    stream = FileLikeSocket()
+    client = type("FakeDockerClient", (), {"api": FakeDockerAPI(stream)})()
+
+    _send_archive_to_work(client, FakeContainer(), payload, timeout_seconds=1)
+
+    assert bytes(stream.received) == payload
+    assert stream.closed
 
 
 def test_runner_creates_a_run_and_replay_uses_saved_artifacts_and_image(tmp_path):
