@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import type { EChartsOption } from "echarts";
 import Papa from "papaparse";
 import {
@@ -23,7 +23,23 @@ import {
   Upload,
 } from "lucide-react";
 import { parseCsvText, type CsvRow } from "./lib/csv";
-import { parseWorkspaceText, type StudyWorkspace } from "./lib/workspace";
+import {
+  analysisInputFingerprint,
+  areColumnsMapped,
+  areDimensionsValid,
+  guessColumn,
+  isAnalysisInputValid,
+  isAnalysisSnapshotCurrent,
+} from "./lib/analysisReadiness";
+import {
+  parseWorkspaceText,
+  type AnalysisResponse,
+  type ComplianceMethod,
+  type InputFileProvenance,
+  type PrintMetadata,
+  type SensorSource,
+  type StudyWorkspace,
+} from "./lib/workspace";
 
 const ResultsChart = lazy(() => import("./ResultsChart"));
 
@@ -45,34 +61,43 @@ interface Settings {
   gaugeLengthMm: string;
 }
 
-interface AnalysisPoint {
-  row_number: number;
-  force_n: number;
-  displacement_mm: number;
-  extension_mm: number;
-  strain: number;
-  stress_mpa: number;
-}
-
-interface AnalysisResponse {
-  summary: {
-    sample_count: number;
-    cross_section_area_mm2: number;
-    gauge_length_mm: number;
-    peak_force_n: number;
-    peak_force_row: number;
-    peak_stress_mpa: number;
-    peak_stress_row: number;
-  };
-  points: AnalysisPoint[];
-}
-
 interface DesktopStudy {
   id: string;
+  revision: number;
   study_name: string;
   source_file_name: string;
   saved_at: string;
   analysis_time: string;
+}
+
+interface TrashedStudy extends DesktopStudy {
+  deleted_at: string;
+  expires_at: string;
+}
+
+interface CampaignReductionResponse {
+  campaign_name: string;
+  configurations: Array<{
+    configuration_id: string;
+    configuration_label: string;
+    specimen_reductions: Array<{
+      specimen_id: string;
+      modulus_mpa: number | null;
+      status: string;
+      reason: string | null;
+    }>;
+    aggregate: {
+      n_total: number;
+      n_valid: number;
+      mean_mpa: number | null;
+      sample_standard_deviation_mpa: number | null;
+      coefficient_of_variation_percent: number | null;
+      minimum_specimens: number;
+      maximum_cv_percent: number;
+      ready_for_validation: boolean;
+      reason: string | null;
+    };
+  }>;
 }
 
 const initialSettings: Settings = {
@@ -82,14 +107,10 @@ const initialSettings: Settings = {
   displacementUnit: "mm",
   decimalSeparator: ".",
   tensionDirection: "positive",
-  widthMm: "10",
-  thicknessMm: "2",
-  gaugeLengthMm: "50",
+  widthMm: "",
+  thicknessMm: "",
+  gaugeLengthMm: "",
 };
-
-function guessColumn(columns: string[], pattern: RegExp): string {
-  return columns.find((column) => pattern.test(column)) ?? columns[0] ?? "";
-}
 
 function formatNumber(value: number, maximumFractionDigits = 2): string {
   return new Intl.NumberFormat("en-GB", { maximumFractionDigits }).format(value);
@@ -121,17 +142,45 @@ export default function App() {
   const [rows, setRows] = useState<CsvRow[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [settings, setSettings] = useState<Settings>(initialSettings);
+  const [specimenMetadata, setSpecimenMetadata] = useState<SpecimenMetadata>(emptySpecimenMetadata);
+  const [inputFile, setInputFile] = useState<InputFileProvenance | null>(null);
+  const [inputCsvBase64, setInputCsvBase64] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null);
+  const [analysisRunId, setAnalysisRunId] = useState<string | null>(null);
   const [analysisTime, setAnalysisTime] = useState("");
+  const [studyRevision, setStudyRevision] = useState<number | null>(null);
+  const [campaignReduction, setCampaignReduction] = useState<CampaignReductionResponse | null>(null);
+  const [campaignRunId, setCampaignRunId] = useState<string | null>(null);
+  const [isReducingCampaign, setIsReducingCampaign] = useState(false);
   const [serverStudyId, setServerStudyId] = useState("");
+  const [workspaceTemplate, setWorkspaceTemplate] = useState<StudyWorkspace | null>(null);
   const [serverStudies, setServerStudies] = useState<DesktopStudy[]>([]);
+  const [trashedStudies, setTrashedStudies] = useState<TrashedStudy[]>([]);
+  const [retentionDays, setRetentionDays] = useState(30);
   const [showDesktopStudies, setShowDesktopStudies] = useState(false);
+  const [saveConflict, setSaveConflict] = useState<{ draft: StudyWorkspace; currentRevision: number; currentSavedAt: string } | null>(null);
+  const [permanentDeleteId, setPermanentDeleteId] = useState<string | null>(null);
   const [isSavingDesktop, setIsSavingDesktop] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [message, setMessage] = useState("");
   const csvInput = useRef<HTMLInputElement>(null);
   const workspaceInput = useRef<HTMLInputElement>(null);
+  const analysisInputFingerprintRef = useRef("");
+  const currentAnalysisFingerprint = analysisInputFingerprint({
+    rows,
+    columns,
+    settings,
+    inputSha256: inputFile?.sha256 ?? null,
+    specimenId: specimenMetadata.specimenId,
+    reductionMetadata: {
+      sensorSource: specimenMetadata.sensorSource,
+      complianceMethod: specimenMetadata.complianceMethod,
+      complianceMmPerN: specimenMetadata.complianceMmPerN,
+      calibrationSource: specimenMetadata.calibrationSource,
+    },
+  });
+  analysisInputFingerprintRef.current = currentAnalysisFingerprint;
 
   useEffect(() => {
     fetch("/api/health")
@@ -143,13 +192,83 @@ export default function App() {
       .catch(() => setApiState("offline"));
   }, []);
 
+  useEffect(() => {
+    if (page !== "results" || apiState !== "ready") return;
+    const workspace = createWorkspace();
+    workspace.campaign.reduction_run_id = null;
+    let active = true;
+    setCampaignRunId(null);
+    setIsReducingCampaign(true);
+    void (async () => {
+      const workspaceBytes = new TextEncoder().encode(JSON.stringify(workspace));
+      const sourceSha256 = await hashBytes(
+        workspaceBytes.buffer.slice(workspaceBytes.byteOffset, workspaceBytes.byteOffset + workspaceBytes.byteLength),
+      );
+      const upstreamRunIds = workspace.specimens
+        .flatMap((specimen) => specimen.test_runs.map((run) => run.run_id))
+        .filter((runId): runId is string => Boolean(runId));
+      const response = await fetch("/api/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          operation: "campaign",
+          input_file: {
+            filename: `${workspace.study_name || "study"}.fdmstudy.json`,
+            media_type: "application/json",
+            sha256: sourceSha256,
+            content_base64: arrayBufferToBase64(workspaceBytes.buffer.slice(
+              workspaceBytes.byteOffset,
+              workspaceBytes.byteOffset + workspaceBytes.byteLength,
+            )),
+          },
+          parameters: {},
+          upstream_run_ids: upstreamRunIds,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "Could not reduce the campaign specimens.");
+      if (!active) return;
+      setCampaignReduction(payload.result as CampaignReductionResponse);
+      const runId = payload.run?.id;
+      if (typeof runId === "string") {
+        setCampaignRunId(runId);
+        setWorkspaceTemplate((current) => current ? {
+          ...current,
+          campaign: { ...current.campaign, reduction_run_id: runId },
+        } : current);
+      }
+    })()
+      .catch((error: unknown) => {
+        if (!active) return;
+        setCampaignReduction(null);
+        setMessage(error instanceof Error ? error.message : "Could not reduce the campaign specimens.");
+      })
+      .finally(() => {
+        if (active) setIsReducingCampaign(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [page, apiState]);
+
+  const setupValid = isAnalysisInputValid(
+    columns,
+    settings.forceColumn,
+    settings.displacementColumn,
+    settings.widthMm,
+    settings.thicknessMm,
+    settings.gaugeLengthMm,
+  );
+  const columnsMapped = areColumnsMapped(columns, settings.forceColumn, settings.displacementColumn);
+  const dimensionsValid = areDimensionsValid(
+    settings.widthMm,
+    settings.thicknessMm,
+    settings.gaugeLengthMm,
+  );
   const canAnalyze =
     rows.length > 0 &&
-    Boolean(settings.forceColumn) &&
-    Boolean(settings.displacementColumn) &&
-    Number(settings.widthMm) > 0 &&
-    Number(settings.thicknessMm) > 0 &&
-    Number(settings.gaugeLengthMm) > 0 &&
+    inputCsvBase64 !== null &&
+    setupValid &&
     apiState === "ready" &&
     !isAnalyzing;
 
@@ -226,6 +345,9 @@ export default function App() {
   function setSetting<K extends keyof Settings>(key: K, value: Settings[K]): void {
     setSettings((current) => ({ ...current, [key]: value }));
     setAnalysis(null);
+    setAnalysisRunId(null);
+    setCampaignRunId(null);
+    setCampaignReduction(null);
   }
 
   async function loadCsv(file: File): Promise<void> {
@@ -235,13 +357,27 @@ export default function App() {
       return;
     }
     try {
-      const parsed = parseCsvText(await file.text());
+      const bytes = await file.arrayBuffer();
+      const parsed = parseCsvText(new TextDecoder().decode(bytes));
+      const sha256 = await hashBytes(bytes);
+      const mediaType = file.type || (file.name.toLowerCase().endsWith(".tsv") ? "text/tab-separated-values" : "text/csv");
       setSourceFileName(file.name);
-      setServerStudyId("");
+      setInputCsvBase64(arrayBufferToBase64(bytes));
+      setInputFile({
+        filename: file.name,
+        media_type: mediaType,
+        size_bytes: file.size,
+        sha256,
+        imported_at: new Date().toISOString(),
+        status: "verified",
+      });
       setColumns(parsed.columns);
       setRows(parsed.rows);
       setWarnings(parsed.warnings);
       setAnalysis(null);
+      setAnalysisRunId(null);
+      setCampaignRunId(null);
+      setCampaignReduction(null);
       setSettings((current) => ({
         ...current,
         forceColumn: guessColumn(parsed.columns, /force|load|kraft/i),
@@ -253,28 +389,111 @@ export default function App() {
     }
   }
 
-  function applyWorkspace(workspace: StudyWorkspace): void {
+  function applyWorkspace(workspace: StudyWorkspace, selectedSpecimenId?: string): void {
+    setWorkspaceTemplate(workspace);
+    const specimen = workspace.specimens.find((item) => item.id === selectedSpecimenId) ?? workspace.specimens[0];
+    const testRun = specimen.test_runs.find((run) => run.primary_for_reduction) ?? specimen.test_runs[0];
+    const configuration = workspace.campaign.configurations.find(
+      (item) => item.id === specimen.configuration_id,
+    );
     setStudyName(workspace.study_name);
     setServerStudyId(workspace.id ?? "");
-    setSourceFileName(workspace.source_file_name);
-    setColumns(workspace.columns);
-    setRows(workspace.rows);
+    setStudyRevision(workspace.revision ?? null);
+    setSourceFileName(testRun?.input_file.filename ?? "");
+    setInputFile(testRun?.input_file ?? null);
+    setInputCsvBase64(null);
+    setColumns(testRun?.columns ?? []);
+    setRows(testRun?.rows ?? []);
     setSettings({
       ...initialSettings,
-      forceColumn: asString(workspace.settings.forceColumn, workspace.columns[0] ?? ""),
-      displacementColumn: asString(workspace.settings.displacementColumn, workspace.columns[1] ?? ""),
-      forceUnit: asUnit<ForceUnit>(workspace.settings.forceUnit, ["N", "kN"], "N"),
-      displacementUnit: asUnit<DisplacementUnit>(workspace.settings.displacementUnit, ["mm", "cm"], "mm"),
-      decimalSeparator: asUnit<"." | ",">(workspace.settings.decimalSeparator, [".", ","], "."),
-      tensionDirection: asUnit<TensionDirection>(workspace.settings.tensionDirection, ["positive", "negative"], "positive"),
-      widthMm: String(workspace.settings.widthMm ?? "10"),
-      thicknessMm: String(workspace.settings.thicknessMm ?? "2"),
-      gaugeLengthMm: String(workspace.settings.gaugeLengthMm ?? "50"),
+      forceColumn: asString(testRun?.settings.forceColumn, ""),
+      displacementColumn: asString(testRun?.settings.displacementColumn, ""),
+      forceUnit: asUnit<ForceUnit>(testRun?.settings.forceUnit, ["N", "kN"], "N"),
+      displacementUnit: asUnit<DisplacementUnit>(testRun?.settings.displacementUnit, ["mm", "cm"], "mm"),
+      decimalSeparator: asUnit<"." | ",">(testRun?.settings.decimalSeparator, [".", ","], "."),
+      tensionDirection: asUnit<TensionDirection>(testRun?.settings.tensionDirection, ["positive", "negative"], "positive"),
+      widthMm: specimen.geometry.width_mm === null ? "" : String(specimen.geometry.width_mm),
+      thicknessMm: specimen.geometry.thickness_mm === null ? "" : String(specimen.geometry.thickness_mm),
+      gaugeLengthMm: specimen.geometry.gauge_length_mm === null ? "" : String(specimen.geometry.gauge_length_mm),
     });
-    setAnalysis(workspace.result as AnalysisResponse | null);
-    setAnalysisTime(workspace.analysis_time || (workspace.result ? workspace.saved_at : ""));
+    setAnalysis(testRun?.result ?? null);
+    setAnalysisRunId(testRun?.run_id ?? null);
+    setCampaignRunId(workspace.campaign.reduction_run_id ?? null);
+    setCampaignReduction(null);
+    setAnalysisTime(testRun?.analysis_time ?? "");
+    setSpecimenMetadata({
+      campaignId: workspace.campaign.id,
+      configurationId: specimen.configuration_id,
+      specimenId: specimen.id,
+      testRunId: testRun?.id ?? newId("test-run"),
+      specimenLabel: specimen.label,
+      configurationLabel: configuration?.label ?? "Configuration 1",
+      sensorSource: testRun?.sensor_source ?? "unknown",
+      sensorSourceDescription: testRun?.sensor_source_description ?? "",
+      testDate: testRun?.test_date ?? "",
+      testStandard: configuration?.test_standard_revision ?? testRun?.test_standard ?? "",
+      operator: testRun?.operator ?? "",
+      machine: testRun?.machine ?? "",
+      loadCell: testRun?.load_cell ?? "",
+      complianceMethod: testRun?.compliance_correction.method ?? "unknown",
+      complianceMmPerN: testRun?.compliance_correction.compliance_mm_per_n === null || testRun?.compliance_correction.compliance_mm_per_n === undefined ? "" : String(testRun.compliance_correction.compliance_mm_per_n),
+      calibrationSource: testRun?.compliance_correction.calibration_source ?? "",
+      print: {
+        material: configuration?.material ?? "",
+        manufacturer: specimen.print_metadata.manufacturer ?? "",
+        materialLot: configuration?.material_lot ?? "",
+        printer: configuration?.printer ?? "",
+        nozzle: configuration?.nozzle ?? "",
+        nozzleDiameterMm: configuration?.nozzle_diameter_mm === null || configuration?.nozzle_diameter_mm === undefined ? "" : String(configuration.nozzle_diameter_mm),
+        layerHeightMm: configuration?.layer_height_mm === null || configuration?.layer_height_mm === undefined ? "" : String(configuration.layer_height_mm),
+        rasterOrientation: configuration?.raster_strategy ?? configuration?.orientation ?? "",
+        infillPercent: configuration?.infill_percent === null || configuration?.infill_percent === undefined ? "" : String(configuration.infill_percent),
+        nozzleTemperatureC: configuration?.nozzle_temperature_c === null || configuration?.nozzle_temperature_c === undefined ? "" : String(configuration.nozzle_temperature_c),
+        bedTemperatureC: configuration?.bed_temperature_c === null || configuration?.bed_temperature_c === undefined ? "" : String(configuration.bed_temperature_c),
+        printDate: specimen.print_metadata.print_date ?? "",
+        gcodeSha256: specimen.print_metadata.gcode_sha256 ?? "",
+      },
+    });
     setWarnings([]);
     setPage("overview");
+  }
+
+  function addAnotherSpecimen(): void {
+    const snapshot = createWorkspace();
+    const nextNumber = snapshot.specimens.length + 1;
+    setWorkspaceTemplate(snapshot);
+    setSpecimenMetadata((current) => ({
+      ...current,
+      specimenId: newId("specimen"),
+      testRunId: newId("test-run"),
+      specimenLabel: `Specimen ${nextNumber}`,
+      testDate: "",
+    }));
+    setSourceFileName("");
+    setInputFile(null);
+    setColumns([]);
+    setRows([]);
+    setWarnings([]);
+    setAnalysis(null);
+    setAnalysisRunId(null);
+    setInputCsvBase64(null);
+    setCampaignRunId(null);
+    setAnalysisTime("");
+    setCampaignReduction(null);
+    setSettings((current) => ({
+      ...current,
+      forceColumn: "",
+      displacementColumn: "",
+      widthMm: "",
+      thicknessMm: "",
+      gaugeLengthMm: "",
+    }));
+    setPage("data");
+  }
+
+  function selectCampaignSpecimen(specimenId: string): void {
+    applyWorkspace(createWorkspace(), specimenId);
+    setCampaignReduction(null);
   }
 
   async function openWorkspace(file: File): Promise<void> {
@@ -291,14 +510,72 @@ export default function App() {
   }
 
   function createWorkspace(): StudyWorkspace {
-    return {
-      format: "styrkeanalyse-fdm-study",
-      version: 1,
-      id: serverStudyId || undefined,
-      saved_at: new Date().toISOString(),
-      analysis_time: analysisTime,
-      study_name: studyName.trim() || "FDM tensile study",
-      source_file_name: sourceFileName,
+    const base = workspaceTemplate;
+    const activeSpecimenId = specimenMetadata.specimenId;
+    const activeSpecimen = base?.specimens.find((specimen) => specimen.id === activeSpecimenId);
+    const printMetadata: PrintMetadata = {
+      material: optionalText(specimenMetadata.print.material),
+      manufacturer: optionalText(specimenMetadata.print.manufacturer),
+      material_lot: optionalText(specimenMetadata.print.materialLot),
+      printer: optionalText(specimenMetadata.print.printer),
+      nozzle: optionalText(specimenMetadata.print.nozzle),
+      nozzle_diameter_mm: optionalNumber(specimenMetadata.print.nozzleDiameterMm),
+      layer_height_mm: optionalNumber(specimenMetadata.print.layerHeightMm),
+      raster_orientation: optionalText(specimenMetadata.print.rasterOrientation),
+      infill_percent: optionalNumber(specimenMetadata.print.infillPercent),
+      nozzle_temperature_c: optionalNumber(specimenMetadata.print.nozzleTemperatureC),
+      bed_temperature_c: optionalNumber(specimenMetadata.print.bedTemperatureC),
+      print_date: optionalDate(specimenMetadata.print.printDate),
+      gcode_sha256: optionalText(specimenMetadata.print.gcodeSha256),
+    };
+    const specimenPrintMetadata: PrintMetadata = {
+      ...printMetadata,
+      material: null,
+      material_lot: null,
+      printer: null,
+      nozzle: null,
+      nozzle_diameter_mm: null,
+      layer_height_mm: null,
+      raster_orientation: null,
+      infill_percent: null,
+      nozzle_temperature_c: null,
+      bed_temperature_c: null,
+    };
+    const geometry = {
+      width_mm: optionalNumber(settings.widthMm),
+      thickness_mm: optionalNumber(settings.thicknessMm),
+      gauge_length_mm: optionalNumber(settings.gaugeLengthMm),
+    };
+    const fileProvenance: InputFileProvenance = inputFile ?? {
+      filename: sourceFileName || "Unknown legacy input file",
+      media_type: null,
+      size_bytes: null,
+      sha256: null,
+      imported_at: null,
+      status: "unavailable_legacy",
+    };
+    const testRun = {
+      id: specimenMetadata.testRunId,
+      run_id: analysisRunId,
+      primary_for_reduction: true,
+      analysis_time: analysisTime || null,
+      test_date: optionalDate(specimenMetadata.testDate),
+      test_type: "tensile",
+      test_standard: optionalText(specimenMetadata.testStandard),
+      operator: optionalText(specimenMetadata.operator),
+      machine: optionalText(specimenMetadata.machine),
+      load_cell: optionalText(specimenMetadata.loadCell),
+      sensor_source: specimenMetadata.sensorSource,
+      sensor_source_description: optionalText(specimenMetadata.sensorSourceDescription),
+      compliance_correction: {
+        method: specimenMetadata.complianceMethod,
+        compliance_mm_per_n: specimenMetadata.complianceMethod === "machine_compliance"
+          ? optionalNumber(specimenMetadata.complianceMmPerN)
+          : null,
+        calibration_source: optionalText(specimenMetadata.calibrationSource),
+        notes: null,
+      },
+      input_file: fileProvenance,
       columns,
       rows,
       settings: {
@@ -308,11 +585,67 @@ export default function App() {
         displacementUnit: settings.displacementUnit,
         decimalSeparator: settings.decimalSeparator,
         tensionDirection: settings.tensionDirection,
-        widthMm: settings.widthMm,
-        thicknessMm: settings.thicknessMm,
-        gaugeLengthMm: settings.gaugeLengthMm,
       },
       result: analysis,
+    };
+    const activeSpecimenRecord = {
+      id: activeSpecimenId,
+      label: specimenMetadata.specimenLabel.trim() || "Specimen 1",
+      configuration_id: specimenMetadata.configurationId,
+      geometry,
+      print_metadata: specimenPrintMetadata,
+      test_runs: [
+        ...(activeSpecimen?.test_runs ?? []).filter((run) => run.id !== specimenMetadata.testRunId),
+        ...(sourceFileName || rows.length ? [testRun] : []),
+      ],
+    };
+    const specimenRecords = [
+      ...(base?.specimens ?? []).filter((specimen) => specimen.id !== activeSpecimenId),
+      activeSpecimenRecord,
+    ];
+    const previousConfiguration = base?.campaign.configurations.find(
+      (configuration) => configuration.id === specimenMetadata.configurationId,
+    );
+    const configuration = {
+      id: specimenMetadata.configurationId,
+      label: specimenMetadata.configurationLabel.trim() || "Configuration 1",
+      material: printMetadata.material,
+      material_lot: printMetadata.material_lot,
+      printer: printMetadata.printer,
+      print_profile: previousConfiguration?.print_profile ?? null,
+      nozzle: printMetadata.nozzle,
+      nozzle_diameter_mm: printMetadata.nozzle_diameter_mm,
+      layer_height_mm: printMetadata.layer_height_mm,
+      orientation: previousConfiguration?.orientation ?? null,
+      build_orientation: previousConfiguration?.build_orientation ?? null,
+      raster_strategy: printMetadata.raster_orientation,
+      infill_percent: printMetadata.infill_percent,
+      nozzle_temperature_c: printMetadata.nozzle_temperature_c,
+      bed_temperature_c: printMetadata.bed_temperature_c,
+      nominal_geometry: previousConfiguration?.nominal_geometry ?? null,
+      test_type: "tensile",
+      test_standard_revision: optionalText(specimenMetadata.testStandard),
+    };
+    const configurations = [
+      ...(base?.campaign.configurations ?? []).filter((item) => item.id !== configuration.id),
+      configuration,
+    ];
+    return {
+      format: "styrkeanalyse-fdm-study",
+      version: 3,
+      id: serverStudyId || undefined,
+      revision: studyRevision ?? base?.revision,
+      saved_at: new Date().toISOString(),
+      study_name: studyName.trim() || "FDM tensile study",
+      campaign: {
+        id: specimenMetadata.campaignId,
+        name: studyName.trim() || "FDM tensile study",
+        reduction_run_id: campaignRunId,
+        notes: base?.campaign.notes ?? null,
+        created_at: base?.campaign.created_at ?? null,
+        configurations,
+      },
+      specimens: specimenRecords,
     };
   }
 
@@ -328,10 +661,20 @@ export default function App() {
   async function refreshDesktopStudies(openPanel: boolean): Promise<void> {
     setMessage("");
     try {
-      const response = await fetch("/api/studies");
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error ?? "Could not read studies saved on this desktop.");
-      setServerStudies(payload.studies as DesktopStudy[]);
+      const [activeResponse, trashResponse, retentionResponse] = await Promise.all([
+        fetch("/api/studies"),
+        fetch("/api/trash"),
+        fetch("/api/retention"),
+      ]);
+      const [active, trash, retention] = await Promise.all([
+        activeResponse.json(), trashResponse.json(), retentionResponse.json(),
+      ]);
+      if (!activeResponse.ok) throw new Error(active.error ?? "Could not read studies saved on this desktop.");
+      if (!trashResponse.ok) throw new Error(trash.error ?? "Could not read deleted studies.");
+      if (!retentionResponse.ok) throw new Error(retention.error ?? "Could not read the retention policy.");
+      setServerStudies(active.studies as DesktopStudy[]);
+      setTrashedStudies(trash.studies as TrashedStudy[]);
+      setRetentionDays(retention.retention_days as number);
       setShowDesktopStudies(openPanel);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not reach desktop storage.");
@@ -348,23 +691,135 @@ export default function App() {
       const url = serverStudyId ? `/api/studies/${serverStudyId}` : "/api/studies";
       let response = await fetch(url, {
         method: serverStudyId ? "PUT" : "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(serverStudyId && studyRevision !== null ? { "If-Match": `"${studyRevision}"` } : {}),
+        },
         body: JSON.stringify(workspace),
       });
       if (response.status === 404 && serverStudyId) {
+        const copy = { ...workspace, id: undefined, revision: undefined };
         response = await fetch("/api/studies", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(workspace),
+          body: JSON.stringify(copy),
         });
       }
       const payload = await response.json();
+      if (response.status === 409) {
+        setSaveConflict({
+          draft: workspace,
+          currentRevision: payload.current_revision as number,
+          currentSavedAt: payload.current_saved_at as string,
+        });
+        return;
+      }
       if (!response.ok) throw new Error(payload.error ?? "Could not save this study to the desktop.");
       setServerStudyId(payload.id as string);
+      setStudyRevision(payload.revision as number);
+      setWorkspaceTemplate({ ...workspace, id: payload.id as string, revision: payload.revision as number });
       await refreshDesktopStudies(showDesktopStudies);
       setMessage("Study saved on the desktop. It will be here when you reconnect.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not save this study to the desktop.");
+    } finally {
+      setIsSavingDesktop(false);
+    }
+  }
+
+  async function updateRetentionPolicy(days: number): Promise<void> {
+    try {
+      const response = await fetch("/api/retention", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ retention_days: days }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "Could not update study retention.");
+      setRetentionDays(payload.retention_days as number);
+      await refreshDesktopStudies(true);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not update study retention.");
+    }
+  }
+
+  async function moveStudyToTrash(study: DesktopStudy): Promise<void> {
+    try {
+      const response = await fetch(`/api/studies/${study.id}`, {
+        method: "DELETE",
+        headers: { "If-Match": `"${study.revision}"` },
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "Could not move study to trash.");
+      if (study.id === serverStudyId) {
+        setServerStudyId("");
+        setStudyRevision(null);
+      }
+      await refreshDesktopStudies(true);
+      setMessage("Study moved to trash. You can restore it during the retention period.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not move study to trash.");
+      await refreshDesktopStudies(true);
+    }
+  }
+
+  async function restoreStudy(study: TrashedStudy): Promise<void> {
+    try {
+      const response = await fetch(`/api/studies/${study.id}/restore`, {
+        method: "POST",
+        headers: { "If-Match": `"${study.revision}"` },
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "Could not restore study.");
+      await refreshDesktopStudies(true);
+      setMessage("Study restored.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not restore study.");
+      await refreshDesktopStudies(true);
+    }
+  }
+
+  async function permanentlyDeleteStudy(): Promise<void> {
+    const study = trashedStudies.find((item) => item.id === permanentDeleteId);
+    if (!study) return;
+    try {
+      const response = await fetch(`/api/studies/${study.id}/permanent`, {
+        method: "DELETE",
+        headers: { "If-Match": `"${study.revision}"` },
+      });
+      if (!response.ok) {
+        const payload = await response.json();
+        throw new Error(payload.error ?? "Could not permanently delete study.");
+      }
+      setPermanentDeleteId(null);
+      await refreshDesktopStudies(true);
+      setMessage("Study permanently deleted.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not permanently delete study.");
+      await refreshDesktopStudies(true);
+    }
+  }
+
+  async function saveConflictDraftAsCopy(): Promise<void> {
+    if (!saveConflict) return;
+    setIsSavingDesktop(true);
+    try {
+      const copy = { ...saveConflict.draft, id: undefined, revision: undefined };
+      const response = await fetch("/api/studies", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(copy),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "Could not save the local draft as a copy.");
+      setServerStudyId(payload.id as string);
+      setStudyRevision(payload.revision as number);
+      setWorkspaceTemplate({ ...copy, id: payload.id as string, revision: payload.revision as number });
+      setSaveConflict(null);
+      await refreshDesktopStudies(showDesktopStudies);
+      setMessage("The local draft was saved as a separate study.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not save the local draft as a copy.");
     } finally {
       setIsSavingDesktop(false);
     }
@@ -396,29 +851,62 @@ export default function App() {
 
   async function runAnalysis(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
+    const submittedFingerprint = currentAnalysisFingerprint;
     setMessage("");
+    setCampaignReduction(null);
+    setCampaignRunId(null);
     setIsAnalyzing(true);
     try {
-      const response = await fetch("/api/analysis/tensile", {
+      if (!inputCsvBase64 || !inputFile?.sha256) {
+        throw new Error("Re-import the original CSV before running a new analysis. Saved workspaces do not include source-file bytes.");
+      }
+      const response = await fetch("/api/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          rows,
-          force_column: settings.forceColumn,
-          displacement_column: settings.displacementColumn,
-          width_mm: Number(settings.widthMm),
-          thickness_mm: Number(settings.thicknessMm),
-          gauge_length_mm: Number(settings.gaugeLengthMm),
-          force_unit: settings.forceUnit,
-          displacement_unit: settings.displacementUnit,
-          decimal_separator: settings.decimalSeparator,
-          tension_direction: settings.tensionDirection,
+          operation: "tensile",
+          input_file: {
+            filename: inputFile.filename,
+            media_type: inputFile.media_type ?? "text/csv",
+            sha256: inputFile.sha256,
+            content_base64: inputCsvBase64,
+          },
+          parameters: {
+            force_column: settings.forceColumn,
+            displacement_column: settings.displacementColumn,
+            width_mm: Number(settings.widthMm),
+            thickness_mm: Number(settings.thicknessMm),
+            gauge_length_mm: Number(settings.gaugeLengthMm),
+            force_unit: settings.forceUnit,
+            displacement_unit: settings.displacementUnit,
+            decimal_separator: settings.decimalSeparator,
+            tension_direction: settings.tensionDirection,
+            specimen_id: specimenMetadata.specimenId,
+            sensor_source: specimenMetadata.sensorSource,
+            compliance_correction: {
+              method: specimenMetadata.complianceMethod,
+              compliance_mm_per_n: specimenMetadata.complianceMethod === "machine_compliance"
+                ? optionalNumber(specimenMetadata.complianceMmPerN)
+                : null,
+              calibration_source: optionalText(specimenMetadata.calibrationSource),
+            },
+          },
         }),
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error ?? "Analysis failed. Check the mapped columns and units.");
-      setAnalysis(payload as AnalysisResponse);
-      setAnalysisTime(new Date().toISOString());
+      if (!isAnalysisSnapshotCurrent(submittedFingerprint, analysisInputFingerprintRef.current)) {
+        setMessage("The data or setup changed while analysis was running. The stale result was discarded; run it again.");
+        return;
+      }
+      const runId = (payload.run as { id?: unknown } | undefined)?.id;
+      const createdAt = (payload.run as { created_at?: unknown } | undefined)?.created_at;
+      if (typeof runId !== "string" || !payload.result?.analysis) {
+        throw new Error("The runner returned an invalid Run result.");
+      }
+      setAnalysis(payload.result.analysis as AnalysisResponse);
+      setAnalysisRunId(runId);
+      setAnalysisTime(typeof createdAt === "string" ? createdAt : new Date().toISOString());
       setPage("results");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not complete the analysis.");
@@ -462,6 +950,7 @@ export default function App() {
   }
 
   const pageTitle = page === "overview" ? "Study overview" : page === "data" ? "Data & setup" : "Results explorer";
+  const campaignSpecimens = createWorkspace().specimens;
 
   return (
     <div className="app-shell">
@@ -480,13 +969,13 @@ export default function App() {
         </div>
         <nav className="side-nav" aria-label="Study navigation">
           <span className="eyebrow">WORKSPACE</span>
-          <button className={page === "overview" ? "nav-item active" : "nav-item"} onClick={() => setPage("overview")}>
+          <button aria-label="Overview" className={page === "overview" ? "nav-item active" : "nav-item"} onClick={() => setPage("overview")}>
             <Gauge size={17} /><span>Overview</span>
           </button>
-          <button className={page === "data" ? "nav-item active" : "nav-item"} onClick={() => setPage("data")}>
+          <button aria-label="Data and setup" className={page === "data" ? "nav-item active" : "nav-item"} onClick={() => setPage("data")}>
             <Database size={17} /><span>Data & setup</span>{rows.length > 0 && <span className="nav-count">{rows.length}</span>}
           </button>
-          <button className={page === "results" ? "nav-item active" : "nav-item"} onClick={() => setPage("results")}>
+          <button aria-label="Results" className={page === "results" ? "nav-item active" : "nav-item"} onClick={() => setPage("results")}>
             <BarChart3 size={17} /><span>Results</span>
           </button>
           <div className="nav-divider" />
@@ -525,13 +1014,32 @@ export default function App() {
               <Save size={15} /> Export file
             </button>
             {showDesktopStudies && (
-              <div className="desktop-study-popover" aria-label="Studies saved on the desktop">
+              <div className="desktop-study-popover" role="region" aria-label="Desktop study storage">
                 <div className="desktop-study-heading"><strong>Saved on this desktop</strong><button aria-label="Close saved studies" onClick={() => setShowDesktopStudies(false)}>×</button></div>
                 {serverStudies.length === 0 ? <p>No studies saved here yet. Save the current study to keep it on the host.</p> : serverStudies.map((study) => (
-                  <button className="desktop-study-row" key={study.id} onClick={() => void openDesktopStudy(study.id)}>
-                    <span><strong>{study.study_name}</strong><small>{study.source_file_name || "No source file"}</small></span>
-                    <small>{new Date(study.saved_at).toLocaleDateString()}</small>
-                  </button>
+                  <div className="desktop-study-row" key={study.id}>
+                    <button type="button" className="desktop-study-open" onClick={() => void openDesktopStudy(study.id)}>
+                      <span><strong>{study.study_name}</strong><small>{study.source_file_name || "No source file"}</small></span>
+                      <small>{new Date(study.saved_at).toLocaleDateString()}</small>
+                    </button>
+                    <button className="text-button storage-action" aria-label={`Move ${study.study_name} to trash`} onClick={() => void moveStudyToTrash(study)}>Delete</button>
+                  </div>
+                ))}
+                <div className="retention-control">
+                  <label htmlFor="retention-days">Keep deleted studies for</label>
+                  <select id="retention-days" value={retentionDays} onChange={(event) => void updateRetentionPolicy(Number(event.target.value))}>
+                    {[7, 30, 90, 180, 365, retentionDays].filter((days, index, values) => values.indexOf(days) === index).sort((a, b) => a - b).map((days) => <option value={days} key={days}>{days} days</option>)}
+                  </select>
+                </div>
+                <div className="desktop-study-heading trash-heading"><strong>Trash ({trashedStudies.length})</strong></div>
+                {trashedStudies.length === 0 ? <p>Deleted studies appear here until the retention period ends.</p> : trashedStudies.map((study) => (
+                  <div className="desktop-study-row trashed-study-row" key={study.id}>
+                    <span><strong>{study.study_name}</strong><small>Expires {new Date(study.expires_at).toLocaleDateString()}</small></span>
+                    <div className="trash-actions">
+                      <button className="text-button storage-action" onClick={() => void restoreStudy(study)}>Restore</button>
+                      <button className="text-button storage-action danger-action" onClick={() => setPermanentDeleteId(study.id)}>Delete permanently</button>
+                    </div>
+                  </div>
                 ))}
               </div>
             )}
@@ -582,6 +1090,18 @@ export default function App() {
               rows={rows}
               warnings={warnings}
               settings={settings}
+              campaignSpecimens={campaignSpecimens}
+              activeSpecimenId={specimenMetadata.specimenId}
+              onAddSpecimen={addAnotherSpecimen}
+              onSelectSpecimen={selectCampaignSpecimen}
+              specimenMetadata={specimenMetadata}
+              onMetadataChange={(value) => {
+                setSpecimenMetadata(value);
+                setAnalysis(null);
+                setAnalysisRunId(null);
+                setCampaignRunId(null);
+                setCampaignReduction(null);
+              }}
               setSetting={setSetting}
               isDragging={isDragging}
               onFileDrop={(file) => void loadCsv(file)}
@@ -590,14 +1110,18 @@ export default function App() {
               onTemplate={downloadTemplate}
               onAnalyze={runAnalysis}
               canAnalyze={canAnalyze}
+              columnsMapped={columnsMapped}
+              dimensionsValid={dimensionsValid}
               isAnalyzing={isAnalyzing}
               apiState={apiState}
+              sourceBytesAvailable={inputCsvBase64 !== null}
             />
           )}
 
           {page === "results" && (
             <ResultsPage
               analysis={analysis}
+              analysisRunId={analysisRunId}
               analysisTime={analysisTime}
               sourceFileName={sourceFileName}
               forceChart={forceChart}
@@ -607,6 +1131,9 @@ export default function App() {
               onAnalyze={() => setPage("data")}
               onDownloadCsv={downloadReducedCsv}
               onDownloadJson={downloadAnalysisJson}
+              campaignReduction={campaignReduction}
+              campaignRunId={campaignRunId}
+              isReducingCampaign={isReducingCampaign}
             />
           )}
 
@@ -623,6 +1150,33 @@ export default function App() {
           />
         </div>
       </main>
+      {saveConflict && (
+        <div className="modal-backdrop">
+          <section className="confirmation-dialog" role="dialog" tabIndex={-1} aria-modal="true" aria-labelledby="save-conflict-title" aria-describedby="save-conflict-description" onKeyDown={(event) => keepDialogFocus(event, () => setSaveConflict(null))}>
+            <div className="section-eyebrow">SAVE CONFLICT</div>
+            <h2 id="save-conflict-title">This study changed on another device</h2>
+            <p id="save-conflict-description">Your local draft is still open. The desktop has revision {saveConflict.currentRevision}{saveConflict.currentSavedAt ? `, saved ${new Date(saveConflict.currentSavedAt).toLocaleString()}` : ""}.</p>
+            <div className="dialog-actions">
+              <button className="button button-secondary" autoFocus onClick={() => { const id = serverStudyId; setSaveConflict(null); void openDesktopStudy(id); }}>Reload and discard local draft</button>
+              <button className="button button-primary" disabled={isSavingDesktop} onClick={() => void saveConflictDraftAsCopy()}>{isSavingDesktop ? "Saving…" : "Save local draft as a copy"}</button>
+              <button className="text-button" onClick={() => setSaveConflict(null)}>Keep working on local draft</button>
+            </div>
+          </section>
+        </div>
+      )}
+      {permanentDeleteId && (
+        <div className="modal-backdrop">
+          <section className="confirmation-dialog" role="alertdialog" tabIndex={-1} aria-modal="true" aria-labelledby="permanent-delete-title" aria-describedby="permanent-delete-description" onKeyDown={(event) => keepDialogFocus(event, () => setPermanentDeleteId(null))}>
+            <div className="section-eyebrow">PERMANENT DELETION</div>
+            <h2 id="permanent-delete-title">Delete this study permanently?</h2>
+            <p id="permanent-delete-description">This removes the study and its measurement rows from desktop storage. You cannot restore it afterward.</p>
+            <div className="dialog-actions">
+              <button className="button button-secondary" autoFocus onClick={() => setPermanentDeleteId(null)}>Cancel</button>
+              <button className="button button-danger" onClick={() => void permanentlyDeleteStudy()}>Delete permanently</button>
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 }
@@ -700,11 +1254,20 @@ function WorkflowCard(props: { number: string; icon: ReactNode; title: string; d
 }
 
 interface DataPageProps {
+  sourceBytesAvailable: boolean;
   sourceFileName: string;
   columns: string[];
   rows: CsvRow[];
   warnings: string[];
   settings: Settings;
+  campaignSpecimens: StudyWorkspace["specimens"];
+  activeSpecimenId: string;
+  onAddSpecimen: () => void;
+  onSelectSpecimen: (specimenId: string) => void;
+  specimenMetadata: SpecimenMetadata;
+  onMetadataChange: (metadata: SpecimenMetadata) => void;
+  columnsMapped: boolean;
+  dimensionsValid: boolean;
   setSetting: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
   isDragging: boolean;
   onFileDrop: (file: File) => void;
@@ -719,6 +1282,18 @@ interface DataPageProps {
 
 function DataPage(props: DataPageProps) {
   const isEmpty = props.rows.length === 0;
+  const configurationSpecimenCount = props.campaignSpecimens.filter(
+    (specimen) => specimen.configuration_id === props.specimenMetadata.configurationId,
+  ).length;
+  function setMetadata<K extends keyof SpecimenMetadata>(key: K, value: SpecimenMetadata[K]): void {
+    props.onMetadataChange({ ...props.specimenMetadata, [key]: value });
+  }
+  function setPrintMetadata<K extends keyof SpecimenMetadata["print"]>(key: K, value: SpecimenMetadata["print"][K]): void {
+    props.onMetadataChange({
+      ...props.specimenMetadata,
+      print: { ...props.specimenMetadata.print, [key]: value },
+    });
+  }
   return (
     <div className="data-layout">
       <div className="data-main-column">
@@ -749,13 +1324,40 @@ function DataPage(props: DataPageProps) {
           {props.warnings.length > 0 && <div className="warning-list"><CircleAlert size={16} /><div><strong>Import warnings</strong>{props.warnings.slice(0, 4).map((warning) => <span key={warning}>{warning}</span>)}</div></div>}
         </section>
 
+        <section className="panel campaign-specimens-panel" aria-labelledby="campaign-specimens-title">
+          <div className="panel-heading">
+            <div><div className="section-eyebrow">CAMPAIGN REPLICATES</div><h2 id="campaign-specimens-title">Specimens in this campaign</h2><p>Each physical specimen counts once; measurement rows are not replicates.</p></div>
+            <span className={configurationSpecimenCount >= 5 ? "replicate-count ready" : "replicate-count"}>{configurationSpecimenCount} / 5 minimum</span>
+          </div>
+          <div className="campaign-specimen-list">
+            {props.campaignSpecimens.map((specimen) => {
+              const run = specimen.test_runs.find((testRun) => testRun.primary_for_reduction);
+              return (
+                <button
+                  type="button"
+                  key={specimen.id}
+                  className={specimen.id === props.activeSpecimenId ? "campaign-specimen active" : "campaign-specimen"}
+                  aria-pressed={specimen.id === props.activeSpecimenId}
+                  onClick={() => props.onSelectSpecimen(specimen.id)}
+                >
+                  <span><strong>{specimen.label}</strong><small>{run?.input_file.filename ?? "No test file yet"}</small></span>
+                  <span className={run?.result ? "specimen-analysis-state complete" : "specimen-analysis-state"}>{run?.result ? "Analysed" : "Needs analysis"}</span>
+                </button>
+              );
+            })}
+          </div>
+          <button className="text-button add-specimen-button" type="button" disabled={isEmpty} onClick={props.onAddSpecimen}>
+            <Upload size={14} /> Add another specimen to this configuration
+          </button>
+        </section>
+
         {!isEmpty && (
           <>
             <section className="panel mapping-panel">
               <div className="panel-heading"><div><div className="section-eyebrow">02 · COLUMN MAPPING</div><h2>Tell us what each column means</h2><p>We suggest matches by header name. Check them before continuing.</p></div><div className="step-mini"><span>1</span><span>2</span><span>3</span></div></div>
               <div className="mapping-grid">
-                <SelectField label="Force column" value={props.settings.forceColumn} options={props.columns} onChange={(value) => props.setSetting("forceColumn", value)} />
-                <SelectField label="Displacement column" value={props.settings.displacementColumn} options={props.columns} onChange={(value) => props.setSetting("displacementColumn", value)} />
+                <SelectField label="Force column" value={props.settings.forceColumn} options={props.columns} allowEmpty onChange={(value) => props.setSetting("forceColumn", value)} />
+                <SelectField label="Displacement column" value={props.settings.displacementColumn} options={props.columns} allowEmpty onChange={(value) => props.setSetting("displacementColumn", value)} />
                 <SelectField label="Force unit" value={props.settings.forceUnit} options={["N", "kN"]} onChange={(value) => props.setSetting("forceUnit", value as ForceUnit)} />
                 <SelectField label="Displacement unit" value={props.settings.displacementUnit} options={["mm", "cm"]} onChange={(value) => props.setSetting("displacementUnit", value as DisplacementUnit)} />
                 <SelectField label="Decimal separator" value={props.settings.decimalSeparator} options={[".", ","]} onChange={(value) => props.setSetting("decimalSeparator", value as "." | ",")} />
@@ -775,6 +1377,51 @@ function DataPage(props: DataPageProps) {
               <div className="mapping-note"><Info size={15} /><span>Force is converted to newtons and displacement to millimetres before calculation. The first displacement value is treated as the zero point.</span></div>
             </section>
 
+            <section className="panel metadata-panel">
+              <details>
+                <summary><span><span className="section-eyebrow">04 · TRACEABILITY</span><strong>Campaign, test, and print metadata</strong><small>Record what is known; unknown fields stay explicitly blank.</small></span><ChevronRight size={17} /></summary>
+                <div className="metadata-content">
+                  <h3>Configuration and specimen</h3>
+                  <div className="mapping-grid">
+                    <TextField label="Configuration label" value={props.specimenMetadata.configurationLabel} onChange={(value) => setMetadata("configurationLabel", value)} />
+                    <TextField label="Specimen ID / label" value={props.specimenMetadata.specimenLabel} onChange={(value) => setMetadata("specimenLabel", value)} />
+                  </div>
+                  <h3>Test and measurement source</h3>
+                  <div className="mapping-grid">
+                    <SelectField label="Displacement sensor source" value={props.specimenMetadata.sensorSource} options={["unknown", "extensometer", "crosshead", "clip_gauge", "dic", "other"]} onChange={(value) => setMetadata("sensorSource", value as SensorSource)} />
+                    {props.specimenMetadata.sensorSource === "other" && <TextField label="Describe the sensor" value={props.specimenMetadata.sensorSourceDescription} onChange={(value) => setMetadata("sensorSourceDescription", value)} />}
+                    <TextField label="Test date" type="date" value={props.specimenMetadata.testDate} onChange={(value) => setMetadata("testDate", value)} />
+                    <TextField label="Test standard and revision" value={props.specimenMetadata.testStandard} onChange={(value) => setMetadata("testStandard", value)} />
+                    <TextField label="Operator" value={props.specimenMetadata.operator} onChange={(value) => setMetadata("operator", value)} />
+                    <TextField label="Test machine" value={props.specimenMetadata.machine} onChange={(value) => setMetadata("machine", value)} />
+                    <TextField label="Load cell" value={props.specimenMetadata.loadCell} onChange={(value) => setMetadata("loadCell", value)} />
+                    <SelectField label="Compliance correction" value={props.specimenMetadata.complianceMethod} options={["unknown", "not_required", "machine_compliance", "other"]} onChange={(value) => setMetadata("complianceMethod", value as ComplianceMethod)} />
+                    {props.specimenMetadata.complianceMethod === "machine_compliance" && <>
+                      <TextField label="Compliance (mm/N)" type="number" value={props.specimenMetadata.complianceMmPerN} onChange={(value) => setMetadata("complianceMmPerN", value)} />
+                      <TextField label="Calibration source" value={props.specimenMetadata.calibrationSource} onChange={(value) => setMetadata("calibrationSource", value)} />
+                    </>}
+                  </div>
+                  <h3>Print and material</h3>
+                  <div className="mapping-grid">
+                    <TextField label="Material / polymer" value={props.specimenMetadata.print.material} onChange={(value) => setPrintMetadata("material", value)} />
+                    <TextField label="Manufacturer" value={props.specimenMetadata.print.manufacturer} onChange={(value) => setPrintMetadata("manufacturer", value)} />
+                    <TextField label="Material lot" value={props.specimenMetadata.print.materialLot} onChange={(value) => setPrintMetadata("materialLot", value)} />
+                    <TextField label="Printer" value={props.specimenMetadata.print.printer} onChange={(value) => setPrintMetadata("printer", value)} />
+                    <TextField label="Nozzle" value={props.specimenMetadata.print.nozzle} onChange={(value) => setPrintMetadata("nozzle", value)} />
+                    <TextField label="Nozzle diameter (mm)" type="number" value={props.specimenMetadata.print.nozzleDiameterMm} onChange={(value) => setPrintMetadata("nozzleDiameterMm", value)} />
+                    <TextField label="Layer height (mm)" type="number" value={props.specimenMetadata.print.layerHeightMm} onChange={(value) => setPrintMetadata("layerHeightMm", value)} />
+                    <TextField label="Raster / build orientation" value={props.specimenMetadata.print.rasterOrientation} onChange={(value) => setPrintMetadata("rasterOrientation", value)} />
+                    <TextField label="Infill (%)" type="number" value={props.specimenMetadata.print.infillPercent} onChange={(value) => setPrintMetadata("infillPercent", value)} />
+                    <TextField label="Nozzle temperature (°C)" type="number" value={props.specimenMetadata.print.nozzleTemperatureC} onChange={(value) => setPrintMetadata("nozzleTemperatureC", value)} />
+                    <TextField label="Bed temperature (°C)" type="number" value={props.specimenMetadata.print.bedTemperatureC} onChange={(value) => setPrintMetadata("bedTemperatureC", value)} />
+                    <TextField label="Print date" type="date" value={props.specimenMetadata.print.printDate} onChange={(value) => setPrintMetadata("printDate", value)} />
+                    <TextField label="G-code SHA-256" value={props.specimenMetadata.print.gcodeSha256} onChange={(value) => setPrintMetadata("gcodeSha256", value)} />
+                  </div>
+                  <div className="mapping-note"><Info size={15} /><span>Imported-file SHA-256, byte size, and import time are captured automatically and saved with this test run.</span></div>
+                </div>
+              </details>
+            </section>
+
             <section className="panel preview-panel">
               <div className="panel-heading"><div><div className="section-eyebrow">DATA CHECK</div><h2>Preview your measurements</h2><p>Showing the first {Math.min(6, props.rows.length)} of {props.rows.length.toLocaleString()} rows.</p></div><span className="preview-tag"><CheckCircle2 size={14} /> Values preserved as imported</span></div>
               <div className="table-scroll"><table><thead><tr><th>Row</th>{props.columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{props.rows.slice(0, 6).map((row, index) => <tr key={index}><td className="row-index">{index + 1}</td>{props.columns.map((column) => <td key={column}>{row[column] ?? <span className="missing-value">blank</span>}</td>)}</tr>)}</tbody></table></div>
@@ -788,10 +1435,14 @@ function DataPage(props: DataPageProps) {
           <div className="section-eyebrow">ANALYSIS READINESS</div>
           <h3>{isEmpty ? "Waiting for data" : props.canAnalyze ? "Ready to analyse" : "Review setup"}</h3>
           <p>{isEmpty ? "Import a CSV or TSV to start." : "Confirm both columns and the specimen dimensions."}</p>
+          {!isEmpty && !props.sourceBytesAvailable && (
+            <p className="campaign-reduction-empty">Re-import the original CSV to create a new Run. Saved workspaces retain measurement rows, not the source bytes.</p>
+          )}
           <div className="readiness-list">
             <ReadinessItem done={!isEmpty} label="Test file imported" />
-            <ReadinessItem done={Boolean(props.settings.forceColumn && props.settings.displacementColumn)} label="Columns mapped" />
-            <ReadinessItem done={Number(props.settings.widthMm) > 0 && Number(props.settings.thicknessMm) > 0 && Number(props.settings.gaugeLengthMm) > 0} label="Dimensions entered" />
+            <ReadinessItem done={props.columnsMapped} label="Distinct columns mapped" />
+            <ReadinessItem done={props.dimensionsValid} label="Positive dimensions entered" />
+            <ReadinessItem done={configurationSpecimenCount >= 5} label="At least five specimens in configuration" />
             <ReadinessItem done={props.apiState === "ready"} label="Analysis service online" />
           </div>
           {!isEmpty && (
@@ -803,7 +1454,7 @@ function DataPage(props: DataPageProps) {
               </button>
             </form>
           )}
-          {props.apiState === "offline" && <div className="offline-hint">Start the GUI service with <code>docker compose up gui</code>.</div>}
+          {props.apiState === "offline" && <div className="offline-hint">Start the GUI and runner services with <code>docker compose up -d gui runner</code>.</div>}
         </section>
         <section className="panel formula-card">
           <div className="formula-icon"><Gauge size={17} /></div>
@@ -818,8 +1469,146 @@ function DataPage(props: DataPageProps) {
   );
 }
 
-function SelectField(props: { label: string; value: string; options: string[]; onChange: (value: string) => void }) {
-  return <label className="field"><span>{props.label}</span><select value={props.value} onChange={(event) => props.onChange(event.target.value)}>{props.options.map((option) => <option value={option} key={option}>{option}</option>)}</select></label>;
+function SelectField(props: { label: string; value: string; options: string[]; allowEmpty?: boolean; onChange: (value: string) => void }) {
+  return <label className="field"><span>{props.label}</span><select value={props.value} onChange={(event) => props.onChange(event.target.value)}>{props.allowEmpty && <option value="">Select a column</option>}{props.options.map((option) => <option value={option} key={option}>{option}</option>)}</select></label>;
+}
+
+function TextField(props: { label: string; value: string; type?: "text" | "number" | "date"; onChange: (value: string) => void }) {
+  return <label className="field"><span>{props.label}</span><input type={props.type ?? "text"} min={props.type === "number" ? "0" : undefined} step={props.type === "number" ? "any" : undefined} value={props.value} onChange={(event) => props.onChange(event.target.value)} /></label>;
+}
+
+interface SpecimenMetadata {
+  campaignId: string;
+  configurationId: string;
+  specimenId: string;
+  testRunId: string;
+  specimenLabel: string;
+  configurationLabel: string;
+  sensorSource: SensorSource;
+  sensorSourceDescription: string;
+  testDate: string;
+  testStandard: string;
+  operator: string;
+  machine: string;
+  loadCell: string;
+  complianceMethod: ComplianceMethod;
+  complianceMmPerN: string;
+  calibrationSource: string;
+  print: {
+    material: string;
+    manufacturer: string;
+    materialLot: string;
+    printer: string;
+    nozzle: string;
+    nozzleDiameterMm: string;
+    layerHeightMm: string;
+    rasterOrientation: string;
+    infillPercent: string;
+    nozzleTemperatureC: string;
+    bedTemperatureC: string;
+    printDate: string;
+    gcodeSha256: string;
+  };
+}
+
+function newId(prefix: string): string {
+  return `${prefix}-${crypto.randomUUID()}`;
+}
+
+function keepDialogFocus(event: KeyboardEvent<HTMLElement>, onEscape: () => void): void {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    onEscape();
+    return;
+  }
+  if (event.key !== "Tab") return;
+
+  const focusable = Array.from(
+    event.currentTarget.querySelectorAll<HTMLElement>(
+      'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((element) => element.offsetParent !== null && element.getAttribute("aria-hidden") !== "true");
+  if (!focusable.length) {
+    event.preventDefault();
+    event.currentTarget.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && (document.activeElement === first || !focusable.includes(document.activeElement as HTMLElement))) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (document.activeElement === last || !focusable.includes(document.activeElement as HTMLElement))) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function emptySpecimenMetadata(): SpecimenMetadata {
+  return {
+    campaignId: newId("campaign"),
+    configurationId: newId("configuration"),
+    specimenId: newId("specimen"),
+    testRunId: newId("test-run"),
+    specimenLabel: "Specimen 1",
+    configurationLabel: "Configuration 1",
+    sensorSource: "unknown",
+    sensorSourceDescription: "",
+    testDate: "",
+    testStandard: "",
+    operator: "",
+    machine: "",
+    loadCell: "",
+    complianceMethod: "unknown",
+    complianceMmPerN: "",
+    calibrationSource: "",
+    print: {
+      material: "",
+      manufacturer: "",
+      materialLot: "",
+      printer: "",
+      nozzle: "",
+      nozzleDiameterMm: "",
+      layerHeightMm: "",
+      rasterOrientation: "",
+      infillPercent: "",
+      nozzleTemperatureC: "",
+      bedTemperatureC: "",
+      printDate: "",
+      gcodeSha256: "",
+    },
+  };
+}
+
+function optionalText(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function optionalNumber(value: string): number | null {
+  if (!value.trim()) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function optionalDate(value: string): string | null {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
+}
+
+function hashBytes(bytes: ArrayBuffer): Promise<string> {
+  return crypto.subtle.digest("SHA-256", bytes).then((digest) =>
+    Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join(""),
+  );
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
 }
 
 function NumberField(props: { label: string; unit: string; value: string; onChange: (value: string) => void }) {
@@ -832,6 +1621,7 @@ function ReadinessItem(props: { done: boolean; label: string }) {
 
 interface ResultsPageProps {
   analysis: AnalysisResponse | null;
+  analysisRunId: string | null;
   analysisTime: string;
   sourceFileName: string;
   forceChart: EChartsOption;
@@ -841,11 +1631,17 @@ interface ResultsPageProps {
   onAnalyze: () => void;
   onDownloadCsv: () => void;
   onDownloadJson: () => void;
+  campaignReduction: CampaignReductionResponse | null;
+  campaignRunId: string | null;
+  isReducingCampaign: boolean;
 }
 
 function ResultsPage(props: ResultsPageProps) {
   if (!props.analysis) {
-    return <div className="empty-results"><div className="empty-results-icon"><BarChart3 size={24} /></div><h2>No results yet</h2><p>Import a tensile test, confirm its columns and specimen dimensions, then run the baseline analysis.</p><button className="button button-primary" onClick={props.onAnalyze}><Settings2 size={15} /> Go to data setup<ArrowRight size={14} /></button></div>;
+    return <>
+      <div className="empty-results"><div className="empty-results-icon"><BarChart3 size={24} /></div><h2>No result for this specimen yet</h2><p>Import its test data, confirm the columns and dimensions, then run the tensile baseline.</p><button className="button button-primary" onClick={props.onAnalyze}><Settings2 size={15} /> Go to data setup<ArrowRight size={14} /></button></div>
+      <CampaignReductionPanel reduction={props.campaignReduction} runId={props.campaignRunId} isLoading={props.isReducingCampaign} />
+    </>;
   }
   const summary = props.analysis.summary;
   return (
@@ -853,7 +1649,7 @@ function ResultsPage(props: ResultsPageProps) {
       <section className="result-runbar">
         <div className="run-status-icon"><CheckCircle2 size={17} /></div>
         <div><strong>Tensile baseline complete</strong><span>{props.sourceFileName} · {summary.sample_count.toLocaleString()} measurements · {props.analysisTime ? new Date(props.analysisTime).toLocaleString() : ""}</span></div>
-        <div className="runbar-actions"><button className="button button-secondary button-small" onClick={props.onDownloadJson}><ArrowDownToLine size={14} /> Analysis JSON</button><button className="button button-secondary button-small" onClick={props.onDownloadCsv}><ArrowDownToLine size={14} /> Reduced CSV</button><button className="icon-button" aria-label="Change analysis setup" onClick={props.onData}><Settings2 size={16} /></button></div>
+        <div className="runbar-actions">{props.analysisRunId && <a className="text-button" href={`/api/runs/${props.analysisRunId}`} target="_blank" rel="noreferrer">Open tensile Run record</a>}<button className="button button-secondary button-small" onClick={props.onDownloadJson}><ArrowDownToLine size={14} /> Analysis JSON</button><button className="button button-secondary button-small" onClick={props.onDownloadCsv}><ArrowDownToLine size={14} /> Reduced CSV</button><button className="icon-button" aria-label="Change analysis setup" onClick={props.onData}><Settings2 size={16} /></button></div>
       </section>
 
       <div className="result-metrics">
@@ -867,13 +1663,13 @@ function ResultsPage(props: ResultsPageProps) {
         <section className="panel chart-panel">
           <div className="chart-heading"><div><div className="section-eyebrow">MEASURED RESPONSE</div><h2>Force vs. extension</h2><p>Extension is zeroed to the first imported displacement value.</p></div><span className="chart-unit-tag">N · mm</span></div>
           <Suspense fallback={<div className="chart-loading">Loading chart…</div>}>
-            <ResultsChart option={props.forceChart} />
+            <ResultsChart option={props.forceChart} label={`Force versus extension line chart with ${summary.sample_count} points. Peak tensile force ${formatNumber(summary.peak_force_n, 2)} newtons at row ${summary.peak_force_row}. The calculated values table provides a text alternative.`} />
           </Suspense>
         </section>
         <section className="panel chart-panel">
           <div className="chart-heading"><div><div className="section-eyebrow">CALCULATED RESPONSE</div><h2>Nominal stress vs. strain</h2><p>Stress = force / area; strain = extension / gauge length.</p></div><span className="chart-unit-tag">MPa · %</span></div>
           <Suspense fallback={<div className="chart-loading">Loading chart…</div>}>
-            <ResultsChart option={props.stressChart} />
+            <ResultsChart option={props.stressChart} label={`Nominal stress versus engineering strain line chart with ${summary.sample_count} points. Peak nominal stress ${formatNumber(summary.peak_stress_mpa, 3)} megapascals at row ${summary.peak_stress_row}. The calculated values table provides a text alternative.`} />
           </Suspense>
         </section>
       </div>
@@ -883,8 +1679,52 @@ function ResultsPage(props: ResultsPageProps) {
         <div className="table-scroll"><table><thead><tr><th>Row</th><th>Force (N)</th><th>Displacement (mm)</th><th>Extension (mm)</th><th>Strain (mm/mm)</th><th>Stress (MPa)</th></tr></thead><tbody>{props.analysis.points.slice(0, 20).map((point) => <tr key={point.row_number}><td className="row-index">{point.row_number}</td><td>{formatNumber(point.force_n, 4)}</td><td>{formatNumber(point.displacement_mm, 4)}</td><td>{formatNumber(point.extension_mm, 4)}</td><td>{formatNumber(point.strain, 6)}</td><td className="stress-value">{formatNumber(point.stress_mpa, 4)}</td></tr>)}</tbody></table></div>
       </section>
 
+      <CampaignReductionPanel reduction={props.campaignReduction} runId={props.campaignRunId} isLoading={props.isReducingCampaign} />
+
       <div className="result-limit-note"><Info size={15} /><span>This is a nominal tensile baseline only. It does not include machine-compliance correction, replicate statistics, material calibration or FEM predictions.</span></div>
     </>
+  );
+}
+
+function CampaignReductionPanel(props: { reduction: CampaignReductionResponse | null; runId: string | null; isLoading: boolean }) {
+  return (
+    <section className="panel campaign-reduction-panel" aria-labelledby="campaign-reduction-title">
+      <div className="panel-heading">
+        <div><div className="section-eyebrow">REPLICATE REDUCTION</div><h2 id="campaign-reduction-title">Campaign modulus summary</h2><p>Project-defined chord modulus over engineering strain 0.0005–0.0025.</p></div>
+        <div>{props.isLoading && <span className="reduction-loading" role="status">Reducing specimens…</span>}{props.runId && <a className="text-button" href={`/api/runs/${props.runId}`} target="_blank" rel="noreferrer">Open campaign Run record</a>}</div>
+      </div>
+      <p className="scientific-caveat">A passing five-specimen and 15% CoV check is campaign readiness only. FEM comparison still requires the separate solver verification gates.</p>
+      {!props.reduction ? (
+        <p className="campaign-reduction-empty">Campaign reduction is not available yet. Analyse specimens with a recorded extensometer, clip gauge, DIC, or documented crosshead compliance correction.</p>
+      ) : props.reduction.configurations.length === 0 ? (
+        <p className="campaign-reduction-empty">Add specimens to a configuration to calculate campaign statistics.</p>
+      ) : (
+        <div className="configuration-reductions">
+          {props.reduction.configurations.map((configuration) => {
+            const aggregate = configuration.aggregate;
+            return (
+              <section className="configuration-reduction" key={configuration.configuration_id}>
+                <div className="configuration-reduction-heading">
+                  <div><h3>{configuration.configuration_label}</h3><span>{aggregate.n_valid} valid of {aggregate.n_total} specimens</span></div>
+                  <span className={aggregate.ready_for_validation ? "replicate-count ready" : "replicate-count"}>{aggregate.ready_for_validation ? "Replicate gate met" : "Not ready"}</span>
+                </div>
+                <div className="replicate-stat-grid">
+                  <MetricCard label="Mean modulus" value={aggregate.mean_mpa === null ? "—" : formatNumber(aggregate.mean_mpa, 2)} unit="MPa" note={`${aggregate.n_valid} valid specimens`} icon={<Activity size={16} />} accent="teal" />
+                  <MetricCard label="Sample standard deviation" value={aggregate.sample_standard_deviation_mpa === null ? "—" : formatNumber(aggregate.sample_standard_deviation_mpa, 2)} unit="MPa" note="Sample SD (n − 1)" icon={<BarChart3 size={16} />} accent="blue" />
+                  <MetricCard label="Coefficient of variation" value={aggregate.coefficient_of_variation_percent === null ? "—" : formatNumber(aggregate.coefficient_of_variation_percent, 2)} unit="%" note={`Limit ${formatNumber(aggregate.maximum_cv_percent, 1)}%`} icon={<Gauge size={16} />} accent="amber" />
+                </div>
+                {aggregate.reason && <p className="campaign-reduction-reason">{aggregate.reason}</p>}
+                <div className="table-scroll" role="region" aria-label={`${configuration.configuration_label} specimen modulus details`} tabIndex={0}>
+                  <table><caption>One reduction per physical specimen</caption><thead><tr><th>Specimen</th><th>Status</th><th>Modulus (MPa)</th><th>Reason</th></tr></thead><tbody>
+                    {configuration.specimen_reductions.map((specimen) => <tr key={specimen.specimen_id}><td>{specimen.specimen_id}</td><td>{specimen.status === "eligible" ? "Eligible" : "Needs review"}</td><td>{specimen.modulus_mpa === null ? "—" : formatNumber(specimen.modulus_mpa, 2)}</td><td>{specimen.reason ?? "—"}</td></tr>)}
+                  </tbody></table>
+                </div>
+              </section>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }
 

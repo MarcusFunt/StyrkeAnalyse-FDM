@@ -68,14 +68,21 @@ services:
     build:
       context: .
       dockerfile: docker/gui.Dockerfile
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        GIT_DIRTY: ${GIT_DIRTY:-unknown}
     image: styrkeanalyse-fdm:gui
     init: true
     restart: unless-stopped
+    depends_on:
+      runner:
+        condition: service_healthy
     environment:
       FDM_GUI_HOST: 0.0.0.0
       FDM_GUI_PORT: "8000"
       FDM_GUI_STATIC_DIR: /app/frontend/dist
       FDM_GUI_DATA_DIR: /data
+      FDM_RUNNER_URL: http://runner:8020
     ports: ["127.0.0.1:8010:8000"]
     volumes:
       - gui_data:/data
@@ -85,6 +92,41 @@ services:
       timeout: 3s
       start_period: 5s
       retries: 3
+
+  runner:
+    build:
+      context: .
+      dockerfile: docker/runner.Dockerfile
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        GIT_DIRTY: ${GIT_DIRTY:-unknown}
+    image: styrkeanalyse-fdm:runner
+    init: true
+    restart: unless-stopped
+    user: "0:0"
+    environment:
+      FDM_RUNNER_HOST: 0.0.0.0
+      FDM_RUNNER_PORT: "8020"
+      FDM_RUNNER_DATA_DIR: /data
+    volumes:
+      - gui_data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8020/api/health', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+  exp-reduction:
+    profiles: ["stage-build"]
+    build:
+      context: .
+      dockerfile: docker/exp-reduction.Dockerfile
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        GIT_DIRTY: ${GIT_DIRTY:-unknown}
+    image: styrkeanalyse-fdm:exp-reduction
 
 volumes:
   gui_data:

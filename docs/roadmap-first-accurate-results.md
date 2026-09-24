@@ -1,12 +1,36 @@
 # Roadmap to the first accurate simulation results
 
-This document audits what is actually implemented today, defines what "accurate"
-has to mean before the word is usable, and lays out the shortest defensible path
-from the current scaffold to a first validated prediction.
+This document defines what "accurate" has to mean before the word is usable and
+lays out the shortest defensible path to a first validated prediction. The
+inventory in §1.1–§1.3 is a historical snapshot of the baseline commit below;
+the dated implementation update immediately after this note records the current
+GUI/mechanics branch state.
 
 It is written against commit `0269782` (branch `main`) and against the project's
 source review (`Kilder – alle kilder med metoder`, 86 entries). Bracketed numbers
 such as [17] refer to that list; §10 maps each milestone back to its sources.
+
+## Implementation update — 2026-09-24
+
+This branch adds an experimental tensile workflow and solver-independent
+mechanics references. It does **not** contain a verified FEM solver result or
+an experimental validation result. Status by roadmap milestone:
+
+| Milestone | Current state on this branch |
+| --- | --- |
+| M0 foundations | Versioned campaign/specimen/test-run workspace, dimensional metadata, source-file SHA-256, and `mm / N / MPa` mechanics references exist. The full stage-by-stage solver provenance record and immutable solver image pins are still missing. |
+| M1 analytical baselines | Tensile stress/strain and chord-modulus references plus three-point-bend nominal stress/strain/modulus functions have hand-calculated unit coverage. They are references, not a solver verification result. |
+| M2 CLT | Plane-stress lamina transforms, ABD assembly, and effective laminate moduli are implemented with analytical fixtures. No FEM cross-check has run. |
+| M3 experiment campaign | The desktop GUI imports tensile files, records campaign/configuration/specimen, test/print/sensor/compliance metadata and source provenance, and reduces one modulus per physical specimen. It reports mean, sample SD, CoV, valid `n`, and the roadmap `n ≥ 5`, `CoV ≤ 15%` readiness check. No physical campaign dataset is included. |
+| M4 isotropic FEM gate | A fail-closed evaluator checks all four roadmap verification records, tolerances, model digest, evidence hashes, and pinned DOLFINx/CalculiX image digests. The current environment has no pinned solver images or evidence artifacts, so the gate is **red** and experiment comparison is not allowed. |
+| M5 orthotropic | The five-constant transversely isotropic stiffness relation, maximum-stress index, and plane-stress Tsai–Wu reference are present. There is no orthotropic FEM adapter, calibrated strength data, CalculiX cross-check, or held-out prediction. `F12` remains an explicit caller-supplied assumption. |
+| M6 fracture | The isotropic elastic `J ↔ K` conversion and a bilinear cohesive traction envelope are analytical helpers only. There is no domain-integral implementation, DCB calibration record, cohesive solver, phase-field model, or fracture validation. |
+| M7 G-code fields | Not implemented. |
+
+The GUI has no FEM-versus-experiment comparison workflow today. If one is added,
+it must require the matching green M4 assessment; the five-specimen campaign
+readiness check is not a substitute for solver verification. The specimen
+workflow is currently tensile-only and records metadata for later test types.
 
 For the existing open-source implementations behind most of these milestones —
 what each one contains, its licence, and a measured estimate of the work to
@@ -19,11 +43,11 @@ stages.
 
 ## 1. Where the implementation actually stands
 
-### 1.1 What exists
+### 1.1 What existed at the audited baseline commit
 
-The repository currently contains a **reproducible environment and nothing else**.
-That is an honest state for a first commit, and the README says so, but it is worth
-being precise about the size of the remaining gap.
+At the audited commit, the repository contained a **reproducible environment and
+nothing else**. That was an honest state for the baseline; it is not the current
+branch state summarized above.
 
 | Area | Status |
 | --- | --- |
@@ -34,7 +58,7 @@ being precise about the size of the remaining gap.
 | Python package `fdm_strength` | Two commands, no physics |
 | Toolpath parsing, meshing, material mapping, solvers, calibration, validation | **Not started** |
 
-The whole of `src/fdm_strength` is 25 lines:
+At that point, the whole of `src/fdm_strength` was 25 lines:
 
 - `__init__.py` — a version string.
 - `cli.py` — `info`, which prints a banner, and `inspect`, which prints a path and

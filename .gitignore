@@ -18,6 +18,12 @@ results/
 *.msh
 *.parquet
 *.csv
+!data/reference/**/*.msh
+!data/reference/**/*.parquet
+!data/reference/**/*.csv
+!tests/data/**/*.msh
+!tests/data/**/*.parquet
+!tests/data/**/*.csv
 
 # Editors and operating systems
 .vscode/
@@ -32,3 +38,6 @@ Thumbs.db
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
+frontend/.playwright-data/
+frontend/playwright-report/
+frontend/test-results/

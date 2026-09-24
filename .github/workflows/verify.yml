@@ -33,5 +33,86 @@ jobs:
         run: npm test --prefix frontend
       - name: Build frontend
         run: npm run build --prefix frontend
+      - name: Build pinned experimental-reduction image
+        run: docker build --build-arg GIT_COMMIT="${GITHUB_SHA}" --build-arg GIT_DIRTY=false -f docker/exp-reduction.Dockerfile -t styrkeanalyse-fdm:exp-reduction .
+      - name: Install Playwright Chromium
+        run: npx --prefix frontend playwright install --with-deps chromium
+      - name: Run browser, mobile, and accessibility checks
+        run: npm run test:e2e --prefix frontend
+      - name: Build runner image
+        run: docker build --build-arg GIT_COMMIT="${GITHUB_SHA}" --build-arg GIT_DIRTY=false -f docker/runner.Dockerfile -t styrkeanalyse-fdm:runner-ci .
       - name: Build desktop GUI image
-        run: docker build -f docker/gui.Dockerfile -t styrkeanalyse-fdm:gui-ci .
+        run: docker build --build-arg GIT_COMMIT="${GITHUB_SHA}" --build-arg GIT_DIRTY=false -f docker/gui.Dockerfile -t styrkeanalyse-fdm:gui-ci .
+      - name: Start GUI and runner images and exercise the isolated stage
+        run: |
+          set -euo pipefail
+          network=fdm-smoke-network
+          volume=fdm-smoke-data
+          runner=fdm-runner-smoke
+          gui=fdm-gui-smoke
+          trap 'docker rm -f "$gui" "$runner" >/dev/null 2>&1 || true; docker network rm "$network" >/dev/null 2>&1 || true; docker volume rm "$volume" >/dev/null 2>&1 || true' EXIT
+          docker network create "$network" >/dev/null
+          docker volume create "$volume" >/dev/null
+          docker run -d --name "$runner" --network "$network" --network-alias runner --user 0:0 \
+            -v /var/run/docker.sock:/var/run/docker.sock -v "$volume:/data" \
+            -e FDM_RUNNER_HOST=0.0.0.0 -e FDM_RUNNER_DATA_DIR=/data styrkeanalyse-fdm:runner-ci
+          for attempt in {1..20}; do
+            runner_health=$(docker inspect --format '{{.State.Health.Status}}' "$runner")
+            if [[ "$runner_health" == "healthy" ]]; then break; fi
+            sleep 2
+          done
+          runner_health=$(docker inspect --format '{{.State.Health.Status}}' "$runner")
+          if [[ "$runner_health" != "healthy" ]]; then docker logs "$runner"; exit 1; fi
+          docker run -d --name "$gui" --network "$network" -p 127.0.0.1:18010:8000 \
+            -v "$volume:/data" -e FDM_RUNNER_URL=http://runner:8020 styrkeanalyse-fdm:gui-ci
+          for attempt in {1..20}; do
+            health=$(docker inspect --format '{{.State.Health.Status}}' "$gui")
+            if [[ "$health" == "healthy" ]]; then
+              curl --fail --silent http://127.0.0.1:18010/api/health
+              break
+            fi
+            sleep 2
+          done
+          health=$(docker inspect --format '{{.State.Health.Status}}' "$gui")
+          if [[ "$health" != "healthy" ]]; then docker logs "$gui"; exit 1; fi
+          python - <<'PY'
+          import base64
+          import hashlib
+          import json
+          from urllib.request import Request, urlopen
+
+          source = b"force_N,displacement_mm\n0,0\n12,0.0125\n24,0.025\n"
+          payload = {
+              "operation": "tensile",
+              "input_file": {
+                  "filename": "smoke.csv",
+                  "media_type": "text/csv",
+                  "sha256": hashlib.sha256(source).hexdigest(),
+                  "content_base64": base64.b64encode(source).decode("ascii"),
+              },
+              "parameters": {
+                  "force_column": "force_N", "displacement_column": "displacement_mm",
+                  "width_mm": 12, "thickness_mm": 1, "gauge_length_mm": 25,
+                  "force_unit": "N", "displacement_unit": "mm",
+                  "decimal_separator": ".", "tension_direction": "positive",
+                  "specimen_id": "ci-smoke", "sensor_source": "extensometer",
+                  "compliance_correction": {"method": "not_required"},
+              },
+          }
+          def call(url, data=None):
+              request = Request(url, data=data, headers={"Content-Type": "application/json"} if data else {})
+              with urlopen(request, timeout=180) as response:
+                  return json.load(response)
+
+          run_response = call(
+              "http://127.0.0.1:18010/api/runs",
+              json.dumps(payload).encode(),
+          )
+          assert run_response["run"]["status"] == "succeeded", run_response
+          assert len(run_response["run"]["stages"][0]["output_artifacts"]) == 2
+          run_id = run_response["run"]["id"]
+          replay = call(f"http://127.0.0.1:18010/api/runs/{run_id}/replay", b"{}")
+          assert replay["run"]["status"] == "succeeded", replay
+          assert replay["result"] == run_response["result"]
+          print("GUI-to-runner stage execution and immutable replay succeeded")
+          PY

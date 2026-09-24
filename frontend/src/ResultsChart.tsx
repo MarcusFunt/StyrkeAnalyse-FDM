@@ -7,6 +7,10 @@ import type { EChartsOption } from "echarts";
 
 echarts.use([LineChart, DataZoomComponent, GridComponent, TooltipComponent, CanvasRenderer]);
 
-export default function ResultsChart({ option }: { option: EChartsOption }) {
-  return <ReactECharts option={option} style={{ height: 304, width: "100%" }} notMerge lazyUpdate />;
+export default function ResultsChart({ option, label }: { option: EChartsOption; label: string }) {
+  return (
+    <div role="img" aria-label={label}>
+      <ReactECharts echarts={echarts} option={option} style={{ height: 304, width: "100%" }} notMerge lazyUpdate />
+    </div>
+  );
 }
