@@ -27,3 +27,8 @@ Thumbs.db
 
 # Local configuration only
 .env
+
+# Browser GUI build output
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo

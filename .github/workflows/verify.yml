@@ -1,0 +1,37 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install Python dependencies
+        run: uv sync --frozen --all-groups
+      - name: Test Python package
+        run: uv run --frozen pytest -q
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+      - name: Test frontend
+        run: npm test --prefix frontend
+      - name: Build frontend
+        run: npm run build --prefix frontend
+      - name: Build desktop GUI image
+        run: docker build -f docker/gui.Dockerfile -t styrkeanalyse-fdm:gui-ci .
