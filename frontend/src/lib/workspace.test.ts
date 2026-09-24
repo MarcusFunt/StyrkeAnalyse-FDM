@@ -59,8 +59,9 @@ describe("parseWorkspaceText", () => {
     const specimen = workspace.specimens[0];
     const testRun = specimen.test_runs[0];
 
-    expect(workspace.version).toBe(2);
+    expect(workspace.version).toBe(3);
     expect(workspace.campaign.name).toBe("PLA tensile study");
+    expect(workspace.campaign.reduction_run_id).toBeNull();
     expect(specimen.geometry.width_mm).toBe(10);
     expect(specimen.print_metadata.material).toBeNull();
     expect(testRun.sensor_source).toBe("unknown");
@@ -81,6 +82,36 @@ describe("parseWorkspaceText", () => {
     const workspace = parseWorkspaceText(JSON.stringify(validV2()));
     expect(workspace.specimens[0].test_runs[0].sensor_source).toBe("extensometer");
     expect(workspace.specimens[0].test_runs[0].input_file.sha256).toBe("a".repeat(64));
+  });
+
+  it("preserves an immutable Run link on its specimen test run", () => {
+    const payload = validV2();
+    payload.specimens[0].test_runs[0].run_id = "8e02d8f8-b1ab-4abc-9fe5-2f65173b6704";
+
+    expect(parseWorkspaceText(JSON.stringify(payload)).specimens[0].test_runs[0].run_id)
+      .toBe(payload.specimens[0].test_runs[0].run_id);
+    payload.specimens[0].test_runs[0].run_id = "bad-id";
+    expect(() => parseWorkspaceText(JSON.stringify(payload))).toThrow(/test-run metadata/i);
+  });
+
+  it("migrates v2 controlled print metadata into Configuration without inventing unknowns", () => {
+    const workspace = parseWorkspaceText(JSON.stringify(validV2()));
+    expect(workspace.version).toBe(3);
+    expect(workspace.campaign.configurations[0].material).toBe("PLA");
+    expect(workspace.campaign.configurations[0].printer).toBeNull();
+    expect(workspace.specimens[0].print_metadata.material).toBeNull();
+  });
+
+  it("rejects v2 specimens with incompatible controlled conditions in one configuration", () => {
+    const payload = validV2();
+    payload.specimens.push({
+      ...structuredClone(payload.specimens[0]),
+      id: "S02",
+      label: "S02",
+      print_metadata: { ...payload.specimens[0].print_metadata, material: "ABS" },
+      test_runs: [{ ...payload.specimens[0].test_runs[0], id: "run-2" }],
+    });
+    expect(() => parseWorkspaceText(JSON.stringify(payload))).toThrow(/configuration/i);
   });
 
   it("rejects invalid JSON and unsupported versions", () => {

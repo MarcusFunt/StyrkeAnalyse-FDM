@@ -144,10 +144,13 @@ export default function App() {
   const [settings, setSettings] = useState<Settings>(initialSettings);
   const [specimenMetadata, setSpecimenMetadata] = useState<SpecimenMetadata>(emptySpecimenMetadata);
   const [inputFile, setInputFile] = useState<InputFileProvenance | null>(null);
+  const [inputCsvBase64, setInputCsvBase64] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null);
+  const [analysisRunId, setAnalysisRunId] = useState<string | null>(null);
   const [analysisTime, setAnalysisTime] = useState("");
   const [studyRevision, setStudyRevision] = useState<number | null>(null);
   const [campaignReduction, setCampaignReduction] = useState<CampaignReductionResponse | null>(null);
+  const [campaignRunId, setCampaignRunId] = useState<string | null>(null);
   const [isReducingCampaign, setIsReducingCampaign] = useState(false);
   const [serverStudyId, setServerStudyId] = useState("");
   const [workspaceTemplate, setWorkspaceTemplate] = useState<StudyWorkspace | null>(null);
@@ -170,6 +173,12 @@ export default function App() {
     settings,
     inputSha256: inputFile?.sha256 ?? null,
     specimenId: specimenMetadata.specimenId,
+    reductionMetadata: {
+      sensorSource: specimenMetadata.sensorSource,
+      complianceMethod: specimenMetadata.complianceMethod,
+      complianceMmPerN: specimenMetadata.complianceMmPerN,
+      calibrationSource: specimenMetadata.calibrationSource,
+    },
   });
   analysisInputFingerprintRef.current = currentAnalysisFingerprint;
 
@@ -186,22 +195,60 @@ export default function App() {
   useEffect(() => {
     if (page !== "results" || apiState !== "ready") return;
     const workspace = createWorkspace();
+    workspace.campaign.reduction_run_id = null;
+    let active = true;
+    setCampaignRunId(null);
     setIsReducingCampaign(true);
-    fetch("/api/analysis/campaign-reduction", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(workspace),
-    })
-      .then(async (response) => {
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error ?? "Could not reduce the campaign specimens.");
-        setCampaignReduction(payload as CampaignReductionResponse);
-      })
+    void (async () => {
+      const workspaceBytes = new TextEncoder().encode(JSON.stringify(workspace));
+      const sourceSha256 = await hashBytes(
+        workspaceBytes.buffer.slice(workspaceBytes.byteOffset, workspaceBytes.byteOffset + workspaceBytes.byteLength),
+      );
+      const upstreamRunIds = workspace.specimens
+        .flatMap((specimen) => specimen.test_runs.map((run) => run.run_id))
+        .filter((runId): runId is string => Boolean(runId));
+      const response = await fetch("/api/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          operation: "campaign",
+          input_file: {
+            filename: `${workspace.study_name || "study"}.fdmstudy.json`,
+            media_type: "application/json",
+            sha256: sourceSha256,
+            content_base64: arrayBufferToBase64(workspaceBytes.buffer.slice(
+              workspaceBytes.byteOffset,
+              workspaceBytes.byteOffset + workspaceBytes.byteLength,
+            )),
+          },
+          parameters: {},
+          upstream_run_ids: upstreamRunIds,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "Could not reduce the campaign specimens.");
+      if (!active) return;
+      setCampaignReduction(payload.result as CampaignReductionResponse);
+      const runId = payload.run?.id;
+      if (typeof runId === "string") {
+        setCampaignRunId(runId);
+        setWorkspaceTemplate((current) => current ? {
+          ...current,
+          campaign: { ...current.campaign, reduction_run_id: runId },
+        } : current);
+      }
+    })()
       .catch((error: unknown) => {
+        if (!active) return;
         setCampaignReduction(null);
         setMessage(error instanceof Error ? error.message : "Could not reduce the campaign specimens.");
       })
-      .finally(() => setIsReducingCampaign(false));
+      .finally(() => {
+        if (active) setIsReducingCampaign(false);
+      });
+    return () => {
+      active = false;
+    };
   }, [page, apiState]);
 
   const setupValid = isAnalysisInputValid(
@@ -220,6 +267,7 @@ export default function App() {
   );
   const canAnalyze =
     rows.length > 0 &&
+    inputCsvBase64 !== null &&
     setupValid &&
     apiState === "ready" &&
     !isAnalyzing;
@@ -297,6 +345,9 @@ export default function App() {
   function setSetting<K extends keyof Settings>(key: K, value: Settings[K]): void {
     setSettings((current) => ({ ...current, [key]: value }));
     setAnalysis(null);
+    setAnalysisRunId(null);
+    setCampaignRunId(null);
+    setCampaignReduction(null);
   }
 
   async function loadCsv(file: File): Promise<void> {
@@ -311,6 +362,7 @@ export default function App() {
       const sha256 = await hashBytes(bytes);
       const mediaType = file.type || (file.name.toLowerCase().endsWith(".tsv") ? "text/tab-separated-values" : "text/csv");
       setSourceFileName(file.name);
+      setInputCsvBase64(arrayBufferToBase64(bytes));
       setInputFile({
         filename: file.name,
         media_type: mediaType,
@@ -323,6 +375,9 @@ export default function App() {
       setRows(parsed.rows);
       setWarnings(parsed.warnings);
       setAnalysis(null);
+      setAnalysisRunId(null);
+      setCampaignRunId(null);
+      setCampaignReduction(null);
       setSettings((current) => ({
         ...current,
         forceColumn: guessColumn(parsed.columns, /force|load|kraft/i),
@@ -338,11 +393,15 @@ export default function App() {
     setWorkspaceTemplate(workspace);
     const specimen = workspace.specimens.find((item) => item.id === selectedSpecimenId) ?? workspace.specimens[0];
     const testRun = specimen.test_runs.find((run) => run.primary_for_reduction) ?? specimen.test_runs[0];
+    const configuration = workspace.campaign.configurations.find(
+      (item) => item.id === specimen.configuration_id,
+    );
     setStudyName(workspace.study_name);
     setServerStudyId(workspace.id ?? "");
     setStudyRevision(workspace.revision ?? null);
     setSourceFileName(testRun?.input_file.filename ?? "");
     setInputFile(testRun?.input_file ?? null);
+    setInputCsvBase64(null);
     setColumns(testRun?.columns ?? []);
     setRows(testRun?.rows ?? []);
     setSettings({
@@ -358,6 +417,9 @@ export default function App() {
       gaugeLengthMm: specimen.geometry.gauge_length_mm === null ? "" : String(specimen.geometry.gauge_length_mm),
     });
     setAnalysis(testRun?.result ?? null);
+    setAnalysisRunId(testRun?.run_id ?? null);
+    setCampaignRunId(workspace.campaign.reduction_run_id ?? null);
+    setCampaignReduction(null);
     setAnalysisTime(testRun?.analysis_time ?? "");
     setSpecimenMetadata({
       campaignId: workspace.campaign.id,
@@ -365,11 +427,11 @@ export default function App() {
       specimenId: specimen.id,
       testRunId: testRun?.id ?? newId("test-run"),
       specimenLabel: specimen.label,
-      configurationLabel: workspace.campaign.configurations.find((item) => item.id === specimen.configuration_id)?.label ?? "Configuration 1",
+      configurationLabel: configuration?.label ?? "Configuration 1",
       sensorSource: testRun?.sensor_source ?? "unknown",
       sensorSourceDescription: testRun?.sensor_source_description ?? "",
       testDate: testRun?.test_date ?? "",
-      testStandard: testRun?.test_standard ?? "",
+      testStandard: configuration?.test_standard_revision ?? testRun?.test_standard ?? "",
       operator: testRun?.operator ?? "",
       machine: testRun?.machine ?? "",
       loadCell: testRun?.load_cell ?? "",
@@ -377,17 +439,17 @@ export default function App() {
       complianceMmPerN: testRun?.compliance_correction.compliance_mm_per_n === null || testRun?.compliance_correction.compliance_mm_per_n === undefined ? "" : String(testRun.compliance_correction.compliance_mm_per_n),
       calibrationSource: testRun?.compliance_correction.calibration_source ?? "",
       print: {
-        material: specimen.print_metadata.material ?? "",
+        material: configuration?.material ?? "",
         manufacturer: specimen.print_metadata.manufacturer ?? "",
-        materialLot: specimen.print_metadata.material_lot ?? "",
-        printer: specimen.print_metadata.printer ?? "",
-        nozzle: specimen.print_metadata.nozzle ?? "",
-        nozzleDiameterMm: specimen.print_metadata.nozzle_diameter_mm === null ? "" : String(specimen.print_metadata.nozzle_diameter_mm),
-        layerHeightMm: specimen.print_metadata.layer_height_mm === null ? "" : String(specimen.print_metadata.layer_height_mm),
-        rasterOrientation: specimen.print_metadata.raster_orientation ?? "",
-        infillPercent: specimen.print_metadata.infill_percent === null ? "" : String(specimen.print_metadata.infill_percent),
-        nozzleTemperatureC: specimen.print_metadata.nozzle_temperature_c === null ? "" : String(specimen.print_metadata.nozzle_temperature_c),
-        bedTemperatureC: specimen.print_metadata.bed_temperature_c === null ? "" : String(specimen.print_metadata.bed_temperature_c),
+        materialLot: configuration?.material_lot ?? "",
+        printer: configuration?.printer ?? "",
+        nozzle: configuration?.nozzle ?? "",
+        nozzleDiameterMm: configuration?.nozzle_diameter_mm === null || configuration?.nozzle_diameter_mm === undefined ? "" : String(configuration.nozzle_diameter_mm),
+        layerHeightMm: configuration?.layer_height_mm === null || configuration?.layer_height_mm === undefined ? "" : String(configuration.layer_height_mm),
+        rasterOrientation: configuration?.raster_strategy ?? configuration?.orientation ?? "",
+        infillPercent: configuration?.infill_percent === null || configuration?.infill_percent === undefined ? "" : String(configuration.infill_percent),
+        nozzleTemperatureC: configuration?.nozzle_temperature_c === null || configuration?.nozzle_temperature_c === undefined ? "" : String(configuration.nozzle_temperature_c),
+        bedTemperatureC: configuration?.bed_temperature_c === null || configuration?.bed_temperature_c === undefined ? "" : String(configuration.bed_temperature_c),
         printDate: specimen.print_metadata.print_date ?? "",
         gcodeSha256: specimen.print_metadata.gcode_sha256 ?? "",
       },
@@ -413,6 +475,9 @@ export default function App() {
     setRows([]);
     setWarnings([]);
     setAnalysis(null);
+    setAnalysisRunId(null);
+    setInputCsvBase64(null);
+    setCampaignRunId(null);
     setAnalysisTime("");
     setCampaignReduction(null);
     setSettings((current) => ({
@@ -463,6 +528,19 @@ export default function App() {
       print_date: optionalDate(specimenMetadata.print.printDate),
       gcode_sha256: optionalText(specimenMetadata.print.gcodeSha256),
     };
+    const specimenPrintMetadata: PrintMetadata = {
+      ...printMetadata,
+      material: null,
+      material_lot: null,
+      printer: null,
+      nozzle: null,
+      nozzle_diameter_mm: null,
+      layer_height_mm: null,
+      raster_orientation: null,
+      infill_percent: null,
+      nozzle_temperature_c: null,
+      bed_temperature_c: null,
+    };
     const geometry = {
       width_mm: optionalNumber(settings.widthMm),
       thickness_mm: optionalNumber(settings.thicknessMm),
@@ -478,9 +556,11 @@ export default function App() {
     };
     const testRun = {
       id: specimenMetadata.testRunId,
+      run_id: analysisRunId,
       primary_for_reduction: true,
       analysis_time: analysisTime || null,
       test_date: optionalDate(specimenMetadata.testDate),
+      test_type: "tensile",
       test_standard: optionalText(specimenMetadata.testStandard),
       operator: optionalText(specimenMetadata.operator),
       machine: optionalText(specimenMetadata.machine),
@@ -513,7 +593,7 @@ export default function App() {
       label: specimenMetadata.specimenLabel.trim() || "Specimen 1",
       configuration_id: specimenMetadata.configurationId,
       geometry,
-      print_metadata: printMetadata,
+      print_metadata: specimenPrintMetadata,
       test_runs: [
         ...(activeSpecimen?.test_runs ?? []).filter((run) => run.id !== specimenMetadata.testRunId),
         ...(sourceFileName || rows.length ? [testRun] : []),
@@ -531,8 +611,20 @@ export default function App() {
       label: specimenMetadata.configurationLabel.trim() || "Configuration 1",
       material: printMetadata.material,
       material_lot: printMetadata.material_lot,
+      printer: printMetadata.printer,
       print_profile: previousConfiguration?.print_profile ?? null,
-      orientation: printMetadata.raster_orientation,
+      nozzle: printMetadata.nozzle,
+      nozzle_diameter_mm: printMetadata.nozzle_diameter_mm,
+      layer_height_mm: printMetadata.layer_height_mm,
+      orientation: previousConfiguration?.orientation ?? null,
+      build_orientation: previousConfiguration?.build_orientation ?? null,
+      raster_strategy: printMetadata.raster_orientation,
+      infill_percent: printMetadata.infill_percent,
+      nozzle_temperature_c: printMetadata.nozzle_temperature_c,
+      bed_temperature_c: printMetadata.bed_temperature_c,
+      nominal_geometry: previousConfiguration?.nominal_geometry ?? null,
+      test_type: "tensile",
+      test_standard_revision: optionalText(specimenMetadata.testStandard),
     };
     const configurations = [
       ...(base?.campaign.configurations ?? []).filter((item) => item.id !== configuration.id),
@@ -540,7 +632,7 @@ export default function App() {
     ];
     return {
       format: "styrkeanalyse-fdm-study",
-      version: 2,
+      version: 3,
       id: serverStudyId || undefined,
       revision: studyRevision ?? base?.revision,
       saved_at: new Date().toISOString(),
@@ -548,6 +640,7 @@ export default function App() {
       campaign: {
         id: specimenMetadata.campaignId,
         name: studyName.trim() || "FDM tensile study",
+        reduction_run_id: campaignRunId,
         notes: base?.campaign.notes ?? null,
         created_at: base?.campaign.created_at ?? null,
         configurations,
@@ -760,22 +853,44 @@ export default function App() {
     event.preventDefault();
     const submittedFingerprint = currentAnalysisFingerprint;
     setMessage("");
+    setCampaignReduction(null);
+    setCampaignRunId(null);
     setIsAnalyzing(true);
     try {
-      const response = await fetch("/api/analysis/tensile", {
+      if (!inputCsvBase64 || !inputFile?.sha256) {
+        throw new Error("Re-import the original CSV before running a new analysis. Saved workspaces do not include source-file bytes.");
+      }
+      const response = await fetch("/api/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          rows,
-          force_column: settings.forceColumn,
-          displacement_column: settings.displacementColumn,
-          width_mm: Number(settings.widthMm),
-          thickness_mm: Number(settings.thicknessMm),
-          gauge_length_mm: Number(settings.gaugeLengthMm),
-          force_unit: settings.forceUnit,
-          displacement_unit: settings.displacementUnit,
-          decimal_separator: settings.decimalSeparator,
-          tension_direction: settings.tensionDirection,
+          operation: "tensile",
+          input_file: {
+            filename: inputFile.filename,
+            media_type: inputFile.media_type ?? "text/csv",
+            sha256: inputFile.sha256,
+            content_base64: inputCsvBase64,
+          },
+          parameters: {
+            force_column: settings.forceColumn,
+            displacement_column: settings.displacementColumn,
+            width_mm: Number(settings.widthMm),
+            thickness_mm: Number(settings.thicknessMm),
+            gauge_length_mm: Number(settings.gaugeLengthMm),
+            force_unit: settings.forceUnit,
+            displacement_unit: settings.displacementUnit,
+            decimal_separator: settings.decimalSeparator,
+            tension_direction: settings.tensionDirection,
+            specimen_id: specimenMetadata.specimenId,
+            sensor_source: specimenMetadata.sensorSource,
+            compliance_correction: {
+              method: specimenMetadata.complianceMethod,
+              compliance_mm_per_n: specimenMetadata.complianceMethod === "machine_compliance"
+                ? optionalNumber(specimenMetadata.complianceMmPerN)
+                : null,
+              calibration_source: optionalText(specimenMetadata.calibrationSource),
+            },
+          },
         }),
       });
       const payload = await response.json();
@@ -784,8 +899,14 @@ export default function App() {
         setMessage("The data or setup changed while analysis was running. The stale result was discarded; run it again.");
         return;
       }
-      setAnalysis(payload as AnalysisResponse);
-      setAnalysisTime(new Date().toISOString());
+      const runId = (payload.run as { id?: unknown } | undefined)?.id;
+      const createdAt = (payload.run as { created_at?: unknown } | undefined)?.created_at;
+      if (typeof runId !== "string" || !payload.result?.analysis) {
+        throw new Error("The runner returned an invalid Run result.");
+      }
+      setAnalysis(payload.result.analysis as AnalysisResponse);
+      setAnalysisRunId(runId);
+      setAnalysisTime(typeof createdAt === "string" ? createdAt : new Date().toISOString());
       setPage("results");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not complete the analysis.");
@@ -974,7 +1095,13 @@ export default function App() {
               onAddSpecimen={addAnotherSpecimen}
               onSelectSpecimen={selectCampaignSpecimen}
               specimenMetadata={specimenMetadata}
-              onMetadataChange={setSpecimenMetadata}
+              onMetadataChange={(value) => {
+                setSpecimenMetadata(value);
+                setAnalysis(null);
+                setAnalysisRunId(null);
+                setCampaignRunId(null);
+                setCampaignReduction(null);
+              }}
               setSetting={setSetting}
               isDragging={isDragging}
               onFileDrop={(file) => void loadCsv(file)}
@@ -987,12 +1114,14 @@ export default function App() {
               dimensionsValid={dimensionsValid}
               isAnalyzing={isAnalyzing}
               apiState={apiState}
+              sourceBytesAvailable={inputCsvBase64 !== null}
             />
           )}
 
           {page === "results" && (
             <ResultsPage
               analysis={analysis}
+              analysisRunId={analysisRunId}
               analysisTime={analysisTime}
               sourceFileName={sourceFileName}
               forceChart={forceChart}
@@ -1003,6 +1132,7 @@ export default function App() {
               onDownloadCsv={downloadReducedCsv}
               onDownloadJson={downloadAnalysisJson}
               campaignReduction={campaignReduction}
+              campaignRunId={campaignRunId}
               isReducingCampaign={isReducingCampaign}
             />
           )}
@@ -1124,6 +1254,7 @@ function WorkflowCard(props: { number: string; icon: ReactNode; title: string; d
 }
 
 interface DataPageProps {
+  sourceBytesAvailable: boolean;
   sourceFileName: string;
   columns: string[];
   rows: CsvRow[];
@@ -1304,6 +1435,9 @@ function DataPage(props: DataPageProps) {
           <div className="section-eyebrow">ANALYSIS READINESS</div>
           <h3>{isEmpty ? "Waiting for data" : props.canAnalyze ? "Ready to analyse" : "Review setup"}</h3>
           <p>{isEmpty ? "Import a CSV or TSV to start." : "Confirm both columns and the specimen dimensions."}</p>
+          {!isEmpty && !props.sourceBytesAvailable && (
+            <p className="campaign-reduction-empty">Re-import the original CSV to create a new Run. Saved workspaces retain measurement rows, not the source bytes.</p>
+          )}
           <div className="readiness-list">
             <ReadinessItem done={!isEmpty} label="Test file imported" />
             <ReadinessItem done={props.columnsMapped} label="Distinct columns mapped" />
@@ -1320,7 +1454,7 @@ function DataPage(props: DataPageProps) {
               </button>
             </form>
           )}
-          {props.apiState === "offline" && <div className="offline-hint">Start the GUI service with <code>docker compose up gui</code>.</div>}
+          {props.apiState === "offline" && <div className="offline-hint">Start the GUI and runner services with <code>docker compose up -d gui runner</code>.</div>}
         </section>
         <section className="panel formula-card">
           <div className="formula-icon"><Gauge size={17} /></div>
@@ -1467,6 +1601,16 @@ function hashBytes(bytes: ArrayBuffer): Promise<string> {
   );
 }
 
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
 function NumberField(props: { label: string; unit: string; value: string; onChange: (value: string) => void }) {
   return <label className="field"><span>{props.label}</span><div className="number-input"><input type="number" min="0.000001" step="any" value={props.value} onChange={(event) => props.onChange(event.target.value)} /><span>{props.unit}</span></div></label>;
 }
@@ -1477,6 +1621,7 @@ function ReadinessItem(props: { done: boolean; label: string }) {
 
 interface ResultsPageProps {
   analysis: AnalysisResponse | null;
+  analysisRunId: string | null;
   analysisTime: string;
   sourceFileName: string;
   forceChart: EChartsOption;
@@ -1487,6 +1632,7 @@ interface ResultsPageProps {
   onDownloadCsv: () => void;
   onDownloadJson: () => void;
   campaignReduction: CampaignReductionResponse | null;
+  campaignRunId: string | null;
   isReducingCampaign: boolean;
 }
 
@@ -1494,7 +1640,7 @@ function ResultsPage(props: ResultsPageProps) {
   if (!props.analysis) {
     return <>
       <div className="empty-results"><div className="empty-results-icon"><BarChart3 size={24} /></div><h2>No result for this specimen yet</h2><p>Import its test data, confirm the columns and dimensions, then run the tensile baseline.</p><button className="button button-primary" onClick={props.onAnalyze}><Settings2 size={15} /> Go to data setup<ArrowRight size={14} /></button></div>
-      <CampaignReductionPanel reduction={props.campaignReduction} isLoading={props.isReducingCampaign} />
+      <CampaignReductionPanel reduction={props.campaignReduction} runId={props.campaignRunId} isLoading={props.isReducingCampaign} />
     </>;
   }
   const summary = props.analysis.summary;
@@ -1503,7 +1649,7 @@ function ResultsPage(props: ResultsPageProps) {
       <section className="result-runbar">
         <div className="run-status-icon"><CheckCircle2 size={17} /></div>
         <div><strong>Tensile baseline complete</strong><span>{props.sourceFileName} · {summary.sample_count.toLocaleString()} measurements · {props.analysisTime ? new Date(props.analysisTime).toLocaleString() : ""}</span></div>
-        <div className="runbar-actions"><button className="button button-secondary button-small" onClick={props.onDownloadJson}><ArrowDownToLine size={14} /> Analysis JSON</button><button className="button button-secondary button-small" onClick={props.onDownloadCsv}><ArrowDownToLine size={14} /> Reduced CSV</button><button className="icon-button" aria-label="Change analysis setup" onClick={props.onData}><Settings2 size={16} /></button></div>
+        <div className="runbar-actions">{props.analysisRunId && <a className="text-button" href={`/api/runs/${props.analysisRunId}`} target="_blank" rel="noreferrer">Open tensile Run record</a>}<button className="button button-secondary button-small" onClick={props.onDownloadJson}><ArrowDownToLine size={14} /> Analysis JSON</button><button className="button button-secondary button-small" onClick={props.onDownloadCsv}><ArrowDownToLine size={14} /> Reduced CSV</button><button className="icon-button" aria-label="Change analysis setup" onClick={props.onData}><Settings2 size={16} /></button></div>
       </section>
 
       <div className="result-metrics">
@@ -1533,19 +1679,19 @@ function ResultsPage(props: ResultsPageProps) {
         <div className="table-scroll"><table><thead><tr><th>Row</th><th>Force (N)</th><th>Displacement (mm)</th><th>Extension (mm)</th><th>Strain (mm/mm)</th><th>Stress (MPa)</th></tr></thead><tbody>{props.analysis.points.slice(0, 20).map((point) => <tr key={point.row_number}><td className="row-index">{point.row_number}</td><td>{formatNumber(point.force_n, 4)}</td><td>{formatNumber(point.displacement_mm, 4)}</td><td>{formatNumber(point.extension_mm, 4)}</td><td>{formatNumber(point.strain, 6)}</td><td className="stress-value">{formatNumber(point.stress_mpa, 4)}</td></tr>)}</tbody></table></div>
       </section>
 
-      <CampaignReductionPanel reduction={props.campaignReduction} isLoading={props.isReducingCampaign} />
+      <CampaignReductionPanel reduction={props.campaignReduction} runId={props.campaignRunId} isLoading={props.isReducingCampaign} />
 
       <div className="result-limit-note"><Info size={15} /><span>This is a nominal tensile baseline only. It does not include machine-compliance correction, replicate statistics, material calibration or FEM predictions.</span></div>
     </>
   );
 }
 
-function CampaignReductionPanel(props: { reduction: CampaignReductionResponse | null; isLoading: boolean }) {
+function CampaignReductionPanel(props: { reduction: CampaignReductionResponse | null; runId: string | null; isLoading: boolean }) {
   return (
     <section className="panel campaign-reduction-panel" aria-labelledby="campaign-reduction-title">
       <div className="panel-heading">
         <div><div className="section-eyebrow">REPLICATE REDUCTION</div><h2 id="campaign-reduction-title">Campaign modulus summary</h2><p>Project-defined chord modulus over engineering strain 0.0005–0.0025.</p></div>
-        {props.isLoading && <span className="reduction-loading" role="status">Reducing specimens…</span>}
+        <div>{props.isLoading && <span className="reduction-loading" role="status">Reducing specimens…</span>}{props.runId && <a className="text-button" href={`/api/runs/${props.runId}`} target="_blank" rel="noreferrer">Open campaign Run record</a>}</div>
       </div>
       <p className="scientific-caveat">A passing five-specimen and 15% CoV check is campaign readiness only. FEM comparison still requires the separate solver verification gates.</p>
       {!props.reduction ? (

@@ -22,7 +22,7 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "uv run --project .. python -m fdm_strength.web",
+    command: "uv run --project .. python ../scripts/run_e2e_stack.py",
     url: "http://127.0.0.1:8012/api/health",
     reuseExistingServer: false,
     timeout: 60_000,
@@ -31,6 +31,10 @@ export default defineConfig({
       FDM_GUI_PORT: "8012",
       FDM_GUI_STATIC_DIR: path.join(frontendDirectory, "dist"),
       FDM_GUI_DATA_DIR: path.join(frontendDirectory, ".playwright-data"),
+      FDM_RUNNER_HOST: "127.0.0.1",
+      FDM_RUNNER_PORT: "8021",
+      FDM_RUNNER_URL: "http://127.0.0.1:8021",
+      FDM_RUNNER_DATA_DIR: path.join(frontendDirectory, ".playwright-data"),
     },
   },
 });

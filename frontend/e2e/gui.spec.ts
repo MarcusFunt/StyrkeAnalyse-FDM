@@ -1,10 +1,17 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { clearBrowserTestStudies } from "./helpers";
 
-const fixture = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "modulus.csv");
+const modulusCsv = Buffer.from([
+  "force_N,displacement_mm",
+  "0,0",
+  "12,0.0125",
+  "24,0.025",
+  "36,0.0375",
+  "48,0.05",
+  "60,0.0625",
+  "72,0.075",
+].join("\n"));
 const browserErrors = new WeakMap<Page, string[]>();
 
 test.beforeEach(async ({ page, request }) => {
@@ -20,7 +27,11 @@ test.afterEach(async ({ page }) => {
 
 async function importFixture(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Data and setup" }).click();
-  await page.locator('input[accept=".csv,.tsv,text/csv,text/tab-separated-values"]').setInputFiles(fixture);
+  await page.locator('input[accept=".csv,.tsv,text/csv,text/tab-separated-values"]').setInputFiles({
+    name: "modulus.csv",
+    mimeType: "text/csv",
+    buffer: modulusCsv,
+  });
   await expect(page.locator(".loaded-file-row")).toContainText("modulus.csv");
   await page.getByLabel("Width").fill("12");
   await page.getByLabel("Thickness").fill("1");
@@ -43,7 +54,7 @@ async function expectNoSeriousA11yViolations(page: Page): Promise<void> {
   expect(summary).toEqual([]);
 }
 
-test("import, analyse, save, reload, and check accessibility", async ({ page }) => {
+test("import, analyse, save, reload, and check accessibility", async ({ page, request }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Study overview" })).toBeVisible();
   await expectNoSeriousA11yViolations(page);
@@ -56,12 +67,37 @@ test("import, analyse, save, reload, and check accessibility", async ({ page }) 
   await expect(page.getByRole("heading", { name: "Results explorer" })).toBeVisible();
   await expect(page.getByText("Campaign modulus summary")).toBeVisible();
   await expect(page.getByText("Mean modulus")).toBeVisible();
+  const tensileRunLink = page.getByRole("link", { name: "Open tensile Run record" });
+  const campaignRunLink = page.getByRole("link", { name: "Open campaign Run record" });
+  await expect(tensileRunLink).toBeVisible();
+  await expect(campaignRunLink).toBeVisible();
+  const tensileRunPath = await tensileRunLink.getAttribute("href");
+  const campaignRunPath = await campaignRunLink.getAttribute("href");
+  expect(tensileRunPath).toMatch(/^\/api\/runs\/[0-9a-f-]{36}$/);
+  expect(campaignRunPath).toMatch(/^\/api\/runs\/[0-9a-f-]{36}$/);
+  const tensileResponse = await request.get(tensileRunPath!);
+  const tensileRun = (await tensileResponse.json()).run;
+  const sourceDigest = tensileRun.input_artifacts[0].sha256 as string;
+  expect(await (await request.get(`/api/artifacts/${sourceDigest}`)).body()).toEqual(modulusCsv);
+  expect(tensileRun.stages[0].output_artifacts).toHaveLength(2);
+  const resultResponse = await request.get(`/api/artifacts/${tensileRun.result_artifact.sha256}`);
+  const resultArtifact = JSON.parse((await resultResponse.body()).toString());
+  const replayResponse = await request.post(`${tensileRunPath}/replay`, { data: {} });
+  const replay = await replayResponse.json();
+  expect(replay.result).toEqual(resultArtifact.result);
+  const campaignResponse = await request.get(campaignRunPath!);
+  const campaignRun = (await campaignResponse.json()).run;
+  expect(campaignRun.upstream_run_ids).toEqual([tensileRun.id]);
   await expectNoSeriousA11yViolations(page);
 
   await page.getByRole("button", { name: "Save on desktop" }).click();
   await page.getByRole("button", { name: "Open on desktop" }).click();
   await expect(page.getByRole("region", { name: "Desktop study storage" })).toBeVisible();
   await expectNoSeriousA11yViolations(page);
+  const savedStudies = (await (await request.get("/api/studies")).json()).studies as Array<{ id: string }>;
+  const savedWorkspace = await (await request.get(`/api/studies/${savedStudies[0].id}`)).json();
+  expect(savedWorkspace.specimens[0].test_runs[0].run_id).toBe(tensileRun.id);
+  expect(savedWorkspace.campaign.reduction_run_id).toBe(campaignRun.id);
   const savedStudy = page.locator(".desktop-study-open").first();
   await expect(savedStudy).toContainText("modulus.csv");
   await savedStudy.click();

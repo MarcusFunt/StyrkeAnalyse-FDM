@@ -1,10 +1,12 @@
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import pytest
 
+from fdm_strength.experimental_reduction import reduce_campaign_workspace
 from fdm_strength.gui_analysis import analyze_tensile_rows
 from fdm_strength.web import _validated_workspace, create_gui_server
 
@@ -74,33 +76,49 @@ def test_analyze_tensile_rows_rejects_boolean_or_overflowing_dimensions(dimensio
         )
 
 
-def test_web_api_returns_the_shared_tensile_analysis():
+def test_gui_proxies_formal_run_submission_to_the_runner(monkeypatch):
+    received = {}
+
+    class FakeRunnerHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            received["path"] = self.path
+            received["payload"] = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            body = json.dumps({"run": {"id": "run-1"}, "result": {"ok": True}}).encode()
+            self.send_response(201)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):
+            pass
+
+    runner = ThreadingHTTPServer(("127.0.0.1", 0), FakeRunnerHandler)
+    runner_thread = Thread(target=runner.serve_forever, daemon=True)
+    runner_thread.start()
+    monkeypatch.setenv("FDM_RUNNER_URL", f"http://127.0.0.1:{runner.server_port}")
     server = create_gui_server("127.0.0.1", 0)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        payload = {
-            "rows": [{"F": "10", "D": "0"}, {"F": "30", "D": "1"}],
-            "force_column": "F",
-            "displacement_column": "D",
-            "width_mm": 5,
-            "thickness_mm": 2,
-            "gauge_length_mm": 25,
-        }
+        payload = {"operation": "tensile", "input_file": {"filename": "raw.csv"}}
         request = Request(
-            f"http://127.0.0.1:{server.server_port}/api/analysis/tensile",
+            f"http://127.0.0.1:{server.server_port}/api/runs",
             data=json.dumps(payload).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
         with urlopen(request) as response:
             result = json.load(response)
-        assert result["summary"]["peak_stress_mpa"] == 3
-        assert result["points"][1]["strain"] == 0.04
+        assert result == {"run": {"id": "run-1"}, "result": {"ok": True}}
+        assert received == {"path": "/api/runs", "payload": payload}
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+        runner.shutdown()
+        runner.server_close()
+        runner_thread.join(timeout=2)
 
 
 def test_web_api_persists_studies_on_the_host_and_can_update_them(tmp_path):
@@ -282,11 +300,11 @@ def test_workspace_validator_accepts_v2_campaigns_with_specimen_provenance():
     }
 
     normalized = _validated_workspace(payload)
-    assert normalized["version"] == 2
+    assert normalized["version"] == 3
     assert normalized["specimens"][0]["test_runs"][0]["sensor_source"] == "unknown"
 
 
-def test_web_api_persists_and_lists_v2_campaign_specimen_metadata(tmp_path):
+def test_web_api_migrates_v2_campaign_metadata_before_persisting(tmp_path):
     server = create_gui_server("127.0.0.1", 0, data_dir=tmp_path)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -337,8 +355,9 @@ def test_web_api_persists_and_lists_v2_campaign_specimen_metadata(tmp_path):
         with urlopen(f"{base_url}/api/studies") as response:
             index = json.load(response)
 
-        assert loaded["version"] == 2
-        assert loaded["specimens"][0]["print_metadata"]["material"] == "PLA"
+        assert loaded["version"] == 3
+        assert loaded["campaign"]["configurations"][0]["material"] == "PLA"
+        assert loaded["specimens"][0]["print_metadata"]["material"] is None
         assert index["studies"][0]["source_file_name"] == "phone.csv"
         delete_request = Request(
             f"{base_url}/api/studies/{created['id']}",
@@ -366,74 +385,57 @@ def test_web_api_persists_and_lists_v2_campaign_specimen_metadata(tmp_path):
         thread.join(timeout=2)
 
 
-def test_campaign_reduction_counts_specimens_not_measurement_rows_and_applies_gate(tmp_path):
-    server = create_gui_server("127.0.0.1", 0, data_dir=tmp_path)
-    thread = Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        specimens = []
-        for index, modulus in enumerate([2000, 2100, 1900, 2000, 2000], start=1):
-            strains = [0, 0.001, 0.003]
-            forces = [modulus * strain * 20 for strain in strains]
-            specimens.append(
-                {
-                    "id": f"S{index:02}",
-                    "label": f"Specimen {index}",
-                    "configuration_id": "cfg-1",
-                    "geometry": {"width_mm": 10, "thickness_mm": 2, "gauge_length_mm": 50},
-                    "print_metadata": {"material": "PLA"},
-                    "test_runs": [
-                        {
-                            "id": f"run-{index}",
-                            "primary_for_reduction": True,
-                            "sensor_source": "extensometer",
-                            "compliance_correction": {"method": "not_required"},
-                            "input_file": {
-                                "filename": f"specimen-{index}.csv",
-                                "status": "unavailable_legacy",
-                            },
-                            "columns": ["F", "D"],
-                            "rows": [
-                                {"F": str(force), "D": str(strain * 50)}
-                                for force, strain in zip(forces, strains, strict=True)
-                            ],
-                            "settings": {
-                                "forceColumn": "F",
-                                "displacementColumn": "D",
-                            },
-                        }
-                    ],
-                }
-            )
-        payload = {
-            "format": "styrkeanalyse-fdm-study",
-            "version": 2,
-            "study_name": "Campaign",
-            "campaign": {
-                "id": "campaign-1",
-                "name": "Campaign",
-                "configurations": [{"id": "cfg-1", "label": "PLA 0/90"}],
-            },
-            "specimens": specimens,
-        }
-        request = Request(
-            f"http://127.0.0.1:{server.server_port}/api/analysis/campaign-reduction",
-            data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
+def test_campaign_reduction_stage_counts_specimens_not_measurement_rows_and_applies_gate():
+    specimens = []
+    for index, modulus in enumerate([2000, 2100, 1900, 2000, 2000], start=1):
+        strains = [0, 0.001, 0.003]
+        forces = [modulus * strain * 20 for strain in strains]
+        specimens.append(
+            {
+                "id": f"S{index:02}",
+                "label": f"Specimen {index}",
+                "configuration_id": "cfg-1",
+                "geometry": {"width_mm": 10, "thickness_mm": 2, "gauge_length_mm": 50},
+                "print_metadata": {"material": "PLA"},
+                "test_runs": [
+                    {
+                        "id": f"run-{index}",
+                        "primary_for_reduction": True,
+                        "sensor_source": "extensometer",
+                        "compliance_correction": {"method": "not_required"},
+                        "input_file": {
+                            "filename": f"specimen-{index}.csv",
+                            "status": "unavailable_legacy",
+                        },
+                        "columns": ["F", "D"],
+                        "rows": [
+                            {"F": str(force), "D": str(strain * 50)}
+                            for force, strain in zip(forces, strains, strict=True)
+                        ],
+                        "settings": {"forceColumn": "F", "displacementColumn": "D"},
+                    }
+                ],
+            }
         )
-        with urlopen(request) as response:
-            result = json.load(response)
+    payload = {
+        "format": "styrkeanalyse-fdm-study",
+        "version": 2,
+        "study_name": "Campaign",
+        "campaign": {
+            "id": "campaign-1",
+            "name": "Campaign",
+            "configurations": [{"id": "cfg-1", "label": "PLA 0/90"}],
+        },
+        "specimens": specimens,
+    }
 
-        aggregate = result["configurations"][0]["aggregate"]
-        assert aggregate["n_total"] == 5
-        assert aggregate["n_valid"] == 5
-        assert aggregate["mean_mpa"] == pytest.approx(2000)
-        assert aggregate["ready_for_validation"] is True
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
+    result = reduce_campaign_workspace(payload)
+
+    aggregate = result["configurations"][0]["aggregate"]
+    assert aggregate["n_total"] == 5
+    assert aggregate["n_valid"] == 5
+    assert aggregate["mean_mpa"] == pytest.approx(2000)
+    assert aggregate["ready_for_validation"] is True
 
 
 def test_study_updates_use_etag_revisions_and_reject_stale_writes(tmp_path):

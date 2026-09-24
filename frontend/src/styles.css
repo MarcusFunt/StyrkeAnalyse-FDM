@@ -229,7 +229,7 @@ h1 { font-size: 25px; line-height: 1.2; margin: 0 0 7px; letter-spacing: -.75px;
 .scientific-caveat { border-left: 3px solid #86aaa5; padding: 7px 9px; background: #f5f9f8; }
 .campaign-reduction-empty { padding: 10px; border-radius: 7px; background: #f8faf9; }
 .campaign-reduction-reason { color: #8c6534; }
-.reduction-loading { color: #64807f; font-size: 9px; }
+.reduction-loading { color: #405b5a; font-size: 9px; }
 .configuration-reductions { display: grid; gap: 14px; }
 .configuration-reduction { display: grid; gap: 10px; padding: 12px; border: 1px solid #e6ecee; border-radius: 8px; }
 .configuration-reduction-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }

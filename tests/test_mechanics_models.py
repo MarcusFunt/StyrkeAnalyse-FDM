@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pytest
 
 from fdm_strength.analytical import (
@@ -27,6 +28,22 @@ from fdm_strength.verification import (
     GateEvidence,
     evaluate_m4_gate,
 )
+
+
+def _general_orthotropic_material():
+    import fdm_strength.orthotropic as orthotropic
+
+    return orthotropic.OrthotropicMaterial(
+        e1_mpa=10_000,
+        e2_mpa=5_000,
+        e3_mpa=2_000,
+        nu12=0.25,
+        nu13=0.3,
+        nu23=0.28,
+        g12_mpa=2_200,
+        g13_mpa=1_300,
+        g23_mpa=700,
+    )
 
 
 def test_tensile_reductions_and_documented_compliance_correction() -> None:
@@ -92,6 +109,99 @@ def test_transverse_isotropic_stiffness_is_symmetric_positive_and_reduces() -> N
     assert material.constants()["g23_mpa"] == pytest.approx(5_000 / (2 * 1.3))
     with pytest.raises(ValueError, match="stable elastic"):
         TransverselyIsotropic(10_000, 5_000, 2, 0.3, 2_000).stiffness_mpa()
+
+
+def test_general_orthotropy_serializes_full_stiffness_and_compliance_matrices():
+    material = _general_orthotropic_material()
+    artifact = material.to_dict()
+    stiffness = np.asarray(artifact["stiffness_mpa"])
+    compliance = np.asarray(artifact["compliance_per_mpa"])
+
+    assert stiffness.shape == (6, 6)
+    assert compliance.shape == (6, 6)
+    assert stiffness @ compliance == pytest.approx(np.eye(6), abs=1e-10)
+    assert artifact["constants"]["e3_mpa"] == 2_000
+
+
+def test_general_orthotropy_recovers_isotropic_limit():
+    import fdm_strength.orthotropic as orthotropic
+
+    young = 3_000.0
+    poisson = 0.3
+    shear = young / (2 * (1 + poisson))
+    lame = young * poisson / ((1 + poisson) * (1 - 2 * poisson))
+    material = orthotropic.OrthotropicMaterial(
+        e1_mpa=young,
+        e2_mpa=young,
+        e3_mpa=young,
+        nu12=poisson,
+        nu13=poisson,
+        nu23=poisson,
+        g12_mpa=shear,
+        g13_mpa=shear,
+        g23_mpa=shear,
+    )
+    expected = np.zeros((6, 6))
+    expected[:3, :3] = lame
+    np.fill_diagonal(expected[:3, :3], lame + 2 * shear)
+    np.fill_diagonal(expected[3:, 3:], shear)
+
+    assert np.asarray(material.stiffness_mpa()) == pytest.approx(expected)
+
+
+def test_transverse_isotropy_is_an_explicit_constrained_specialization():
+    material = TransverselyIsotropic(
+        e1_mpa=10_000,
+        e2_mpa=5_000,
+        nu12=0.25,
+        nu23=0.3,
+        g12_mpa=2_000,
+    ).to_orthotropic()
+
+    assert material.e2_mpa == material.e3_mpa == 5_000
+    assert material.nu12 == material.nu13 == 0.25
+    assert material.g12_mpa == material.g13_mpa == 2_000
+    assert material.g23_mpa == pytest.approx(5_000 / (2 * 1.3))
+
+
+def test_general_orthotropy_rotates_under_a_quarter_turn_axis_permutation():
+    material = _general_orthotropic_material()
+    rotated = np.asarray(
+        material.rotated_stiffness_mpa(
+            ((0, -1, 0), (1, 0, 0), (0, 0, 1)),
+        )
+    )
+    swapped = _general_orthotropic_material().__class__(
+        e1_mpa=5_000,
+        e2_mpa=10_000,
+        e3_mpa=2_000,
+        nu12=0.25 * 5_000 / 10_000,
+        nu13=0.28,
+        nu23=0.3,
+        g12_mpa=2_200,
+        g13_mpa=700,
+        g23_mpa=1_300,
+    )
+
+    assert rotated == pytest.approx(np.asarray(swapped.stiffness_mpa()), abs=1e-9)
+
+
+def test_general_orthotropy_rejects_unstable_compliance():
+    import fdm_strength.orthotropic as orthotropic
+
+    material = orthotropic.OrthotropicMaterial(
+        e1_mpa=1_000,
+        e2_mpa=1_000,
+        e3_mpa=1_000,
+        nu12=0.9,
+        nu13=0.9,
+        nu23=0.9,
+        g12_mpa=100,
+        g13_mpa=100,
+        g23_mpa=100,
+    )
+    with pytest.raises(ValueError, match="stable"):
+        material.stiffness_mpa()
 
 
 def test_maximum_stress_and_tsai_wu_indices_name_mode_and_assumption() -> None:

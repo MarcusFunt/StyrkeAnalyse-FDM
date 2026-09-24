@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
+import fdm_strength.study_models as study_models
 from fdm_strength.gui_analysis import analyze_tensile_rows
 from fdm_strength.study_models import StudyWorkspaceV2
 
@@ -69,6 +70,18 @@ def test_workspace_v2_captures_campaign_specimen_print_test_sensor_and_file_prov
     assert run.input_file.sha256 == "a" * 64
     assert run.input_file.size_bytes == 128
     assert run.input_file.status == "verified"
+
+
+def test_test_run_can_link_to_an_immutable_formal_run():
+    payload = valid_workspace()
+    payload["specimens"][0]["test_runs"][0]["run_id"] = "8e02d8f8-b1ab-4abc-9fe5-2f65173b6704"
+
+    workspace = StudyWorkspaceV2.model_validate(payload)
+
+    assert (
+        workspace.specimens[0].test_runs[0].run_id
+        == payload["specimens"][0]["test_runs"][0]["run_id"]
+    )
 
 
 def test_workspace_v2_allows_legacy_file_provenance_without_inventing_a_digest():
@@ -139,6 +152,78 @@ def test_workspace_v2_rejects_boolean_dimensions_and_physics_values():
     payload["specimens"][0]["geometry"]["width_mm"] = True
     with pytest.raises(ValidationError):
         StudyWorkspaceV2.model_validate(payload)
+
+
+def test_configuration_defines_controlled_print_conditions_and_checks_specimens():
+    payload = valid_workspace()
+    payload["campaign"]["configurations"][0].update(
+        {
+            "material": "PLA",
+            "printer": "printer-1",
+            "nozzle_diameter_mm": 0.4,
+            "layer_height_mm": 0.2,
+            "build_orientation": "XY",
+            "raster_strategy": "0/90",
+            "test_type": "tensile",
+            "test_standard_revision": "ASTM D638-22",
+        }
+    )
+    payload["specimens"][0]["test_runs"][0]["test_standard"] = "ASTM D638-22"
+
+    workspace = StudyWorkspaceV2.model_validate(payload)
+
+    assert workspace.campaign.configurations[0].printer == "printer-1"
+    assert workspace.campaign.configurations[0].test_standard_revision == "ASTM D638-22"
+
+    payload["specimens"][0]["print_metadata"]["printer"] = "printer-2"
+    with pytest.raises(ValidationError, match="configuration"):
+        StudyWorkspaceV2.model_validate(payload)
+
+
+def test_specimens_with_conflicting_legacy_print_conditions_cannot_share_configuration():
+    payload = valid_workspace()
+    second = {
+        **payload["specimens"][0],
+        "id": "S02",
+        "label": "S02",
+        "test_runs": [
+            {**payload["specimens"][0]["test_runs"][0], "id": "run-2"},
+        ],
+        "print_metadata": {**payload["specimens"][0]["print_metadata"], "material": "ABS"},
+    }
+    payload["specimens"].append(second)
+
+    with pytest.raises(ValidationError, match="configuration"):
+        StudyWorkspaceV2.model_validate(payload)
+
+
+def test_v2_configuration_migration_promotes_only_observed_values():
+    payload = valid_workspace()
+    migrated = study_models.migrate_workspace_v2_to_v3(payload)
+
+    assert migrated["version"] == 3
+    assert migrated["campaign"]["configurations"][0]["material"] == "PLA"
+    assert migrated["campaign"]["configurations"][0]["printer"] == "printer-1"
+    assert migrated["campaign"]["configurations"][0]["layer_height_mm"] == 0.2
+    assert migrated["campaign"]["configurations"][0]["raster_strategy"] == "0/90"
+    assert migrated["campaign"]["configurations"][0]["nozzle_temperature_c"] is None
+    assert migrated["specimens"][0]["print_metadata"]["printer"] is None
+    assert study_models.StudyWorkspaceV3.model_validate(migrated).version == 3
+
+
+def test_v2_configuration_migration_rejects_incompatible_replicates():
+    payload = valid_workspace()
+    second = {
+        **payload["specimens"][0],
+        "id": "S02",
+        "label": "S02",
+        "test_runs": [{**payload["specimens"][0]["test_runs"][0], "id": "run-2"}],
+        "print_metadata": {**payload["specimens"][0]["print_metadata"], "material": "ABS"},
+    }
+    payload["specimens"].append(second)
+
+    with pytest.raises(ValueError, match="configuration"):
+        study_models.migrate_workspace_v2_to_v3(payload)
 
     payload = valid_workspace()
     payload["specimens"][0]["print_metadata"]["nozzle_temperature_c"] = True

@@ -11,21 +11,15 @@ import re
 import tempfile
 import threading
 import uuid
-from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlsplit
+from urllib.request import Request, urlopen
 
-from fdm_strength.gui_analysis import analyze_tensile_rows
-from fdm_strength.replicates import (
-    CampaignModulus,
-    SpecimenModulus,
-    aggregate_modulus,
-    reduce_tensile_modulus,
-)
-from fdm_strength.study_models import StudyWorkspaceV2
+from fdm_strength.study_models import StudyWorkspaceV3, migrate_workspace_v2_to_v3
 
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
 MAX_ROW_COUNT = 100_000
@@ -34,6 +28,9 @@ DEFAULT_STATIC_DIR = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 DEFAULT_DATA_DIR = Path.cwd() / "outputs" / "gui"
 STUDY_PATH = re.compile(r"^/api/studies/([0-9a-f-]{36})$")
 STUDY_ACTION_PATH = re.compile(r"^/api/studies/([0-9a-f-]{36})/(restore|permanent)$")
+RUN_PATH = re.compile(r"^/api/runs/([0-9a-f-]{36})$")
+RUN_REPLAY_PATH = re.compile(r"^/api/runs/([0-9a-f-]{36})/replay$")
+ARTIFACT_PATH = re.compile(r"^/api/artifacts/([0-9a-f]{64})$")
 DEFAULT_RETENTION_DAYS = 30
 MIN_RETENTION_DAYS = 1
 MAX_RETENTION_DAYS = 3650
@@ -231,17 +228,19 @@ def _validated_analysis_result(result: Any) -> bool:
 def _validated_workspace(payload: dict[str, Any]) -> dict[str, Any]:
     if payload.get("format") != "styrkeanalyse-fdm-study":
         raise ValueError("Unsupported study workspace format")
-    if payload.get("version") == 2:
+    version = payload.get("version")
+    if version == 2 or version == 3:
         from pydantic import ValidationError
 
         try:
-            validated = StudyWorkspaceV2.model_validate(payload)
+            migrated_payload = migrate_workspace_v2_to_v3(payload) if version == 2 else payload
+            validated = StudyWorkspaceV3.model_validate(migrated_payload)
         except ValidationError as error:
             issues = [
                 f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
                 for item in error.errors(include_url=False)
             ]
-            raise ValueError("Invalid v2 study workspace: " + "; ".join(issues)) from error
+            raise ValueError("Invalid study workspace: " + "; ".join(issues)) from error
         workspace = validated.model_dump(mode="json", exclude={"id", "revision", "saved_at"})
         workspace["saved_at"] = datetime.now(timezone.utc).isoformat()
         return workspace
@@ -373,85 +372,13 @@ def _validated_workspace(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _workspace_measurement_count(workspace: dict[str, Any]) -> int:
-    if workspace.get("version") == 2:
+    if workspace.get("version") in {2, 3}:
         return sum(
             len(test_run["rows"])
             for specimen in workspace["specimens"]
             for test_run in specimen["test_runs"]
         )
     return len(workspace["rows"])
-
-
-def _campaign_modulus_reduction(payload: dict[str, Any]) -> dict[str, Any]:
-    from pydantic import ValidationError
-
-    try:
-        workspace = StudyWorkspaceV2.model_validate(payload)
-    except ValidationError as error:
-        issues = [
-            f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
-            for item in error.errors(include_url=False)
-        ]
-        raise ValueError("Invalid campaign workspace: " + "; ".join(issues)) from error
-
-    configurations = {item.id: item for item in workspace.campaign.configurations}
-    reductions_by_configuration: dict[str, list[SpecimenModulus]] = {
-        configuration_id: [] for configuration_id in configurations
-    }
-    for specimen in workspace.specimens:
-        primary = next((run for run in specimen.test_runs if run.primary_for_reduction), None)
-        if primary is None:
-            reduction = SpecimenModulus(
-                specimen_id=specimen.id,
-                modulus_mpa=None,
-                status="ineligible",
-                reason="No primary test run is selected for reduction.",
-            )
-        else:
-            try:
-                dimensions = specimen.geometry
-                settings = primary.settings
-                result = analyze_tensile_rows(
-                    rows=primary.rows,
-                    force_column=settings.get("forceColumn"),
-                    displacement_column=settings.get("displacementColumn"),
-                    width_mm=dimensions.width_mm,
-                    thickness_mm=dimensions.thickness_mm,
-                    gauge_length_mm=dimensions.gauge_length_mm,
-                    force_unit=settings.get("forceUnit", "N"),
-                    displacement_unit=settings.get("displacementUnit", "mm"),
-                    decimal_separator=settings.get("decimalSeparator", "."),
-                    tension_direction=settings.get("tensionDirection", "positive"),
-                )
-                reduction = reduce_tensile_modulus(
-                    specimen.id,
-                    result["points"],
-                    gauge_length_mm=dimensions.gauge_length_mm,
-                    sensor_source=primary.sensor_source.value,
-                    compliance_correction=primary.compliance_correction.model_dump(mode="python"),
-                )
-            except (TypeError, ValueError) as error:
-                reduction = SpecimenModulus(
-                    specimen_id=specimen.id,
-                    modulus_mpa=None,
-                    status="ineligible",
-                    reason=str(error),
-                )
-        reductions_by_configuration[specimen.configuration_id].append(reduction)
-
-    summaries = []
-    for configuration_id, configuration in configurations.items():
-        reductions = reductions_by_configuration[configuration_id]
-        aggregate: CampaignModulus = aggregate_modulus(reductions)
-        summaries.append(
-            {
-                "configuration_id": configuration_id,
-                "configuration_label": configuration.label,
-                "specimen_reductions": [asdict(reduction) for reduction in reductions],
-                "aggregate": asdict(aggregate),
-            }
-        )
-    return {"campaign_name": workspace.campaign.name, "configurations": summaries}
 
 
 def _load_saved_study(path: Path) -> dict[str, Any]:
@@ -526,6 +453,31 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Request body must be a JSON object"})
             return None
         return payload
+
+    def _proxy_runner(self, method: str, path: str, body: bytes | None = None) -> None:
+        runner_url = os.environ.get("FDM_RUNNER_URL", "http://runner:8020").rstrip("/")
+        headers = {"Accept": "application/json, application/octet-stream"}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        request = Request(runner_url + path, data=body, headers=headers, method=method)
+        try:
+            with urlopen(
+                request, timeout=float(os.environ.get("FDM_RUNNER_TIMEOUT", "180"))
+            ) as response:
+                self._send_bytes(
+                    response.status,
+                    response.read(),
+                    response.headers.get("Content-Type", "application/octet-stream"),
+                )
+        except HTTPError as error:
+            self._send_bytes(
+                error.code,
+                error.read(),
+                error.headers.get("Content-Type", "application/json; charset=utf-8"),
+            )
+        except (URLError, TimeoutError, OSError) as error:
+            LOGGER.warning("Runner request failed: %s", error)
+            self._send_json(503, {"error": "The scientific runner is unavailable"})
 
     def _study_file(self, study_id: str) -> Path:
         return self.data_root / "studies" / f"{study_id}.json"
@@ -616,7 +568,7 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
                             study = _load_saved_study(study_path)
                             if study.get("deleted_at"):
                                 continue
-                            if study.get("version") == 2:
+                            if study.get("version") in {2, 3}:
                                 tests = [
                                     test_run
                                     for specimen in study["specimens"]
@@ -660,7 +612,7 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
                             deleted_at = study.get("deleted_at")
                             if not deleted_at:
                                 continue
-                            if study.get("version") == 2:
+                            if study.get("version") in {2, 3}:
                                 tests = [
                                     test_run
                                     for specimen in study["specimens"]
@@ -713,6 +665,14 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
                 else:
                     revision = _revision(study)
                     self._send_json(200, study, {"ETag": _etag(revision)})
+            return
+        run_match = RUN_PATH.fullmatch(path)
+        if run_match:
+            self._proxy_runner("GET", path)
+            return
+        artifact_match = ARTIFACT_PATH.fullmatch(path)
+        if artifact_match:
+            self._proxy_runner("GET", path)
             return
         if path.startswith("/api/"):
             self._send_json(404, {"error": "API route not found"})
@@ -800,47 +760,17 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
                     return
             self._send_json(200, {"id": study_id, "revision": revision}, {"ETag": _etag(revision)})
             return
-        if path == "/api/analysis/campaign-reduction":
+        if path == "/api/runs" or RUN_REPLAY_PATH.fullmatch(path):
             payload = self._read_json_object()
             if payload is None:
                 return
-            try:
-                reduction = _campaign_modulus_reduction(payload)
-            except ValueError as error:
-                self._send_json(400, {"error": str(error)})
-                return
-            self._send_json(200, reduction)
-            return
-        if path != "/api/analysis/tensile":
-            self._send_json(404, {"error": "API route not found"})
-            return
-        payload = self._read_json_object()
-        if payload is None:
-            return
-        rows = payload.get("rows")
-        if isinstance(rows, list) and len(rows) > MAX_ROW_COUNT:
-            self._send_json(
-                413, {"error": f"At most {MAX_ROW_COUNT:,} rows can be analysed at once"}
+            self._proxy_runner(
+                "POST",
+                path,
+                json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8"),
             )
             return
-        try:
-            result = analyze_tensile_rows(
-                rows=rows,
-                force_column=payload.get("force_column"),
-                displacement_column=payload.get("displacement_column"),
-                width_mm=payload.get("width_mm"),
-                thickness_mm=payload.get("thickness_mm"),
-                gauge_length_mm=payload.get("gauge_length_mm"),
-                force_unit=payload.get("force_unit", "N"),
-                displacement_unit=payload.get("displacement_unit", "mm"),
-                decimal_separator=payload.get("decimal_separator", "."),
-                tension_direction=payload.get("tension_direction", "positive"),
-            )
-        except (TypeError, ValueError) as error:
-            self._send_json(400, {"error": str(error)})
-            return
-        summary = {key: value for key, value in result.items() if key != "points"}
-        self._send_json(200, {"summary": summary, "points": result["points"]})
+        self._send_json(404, {"error": "API route not found"})
 
     def do_PUT(self) -> None:
         path = urlsplit(self.path).path

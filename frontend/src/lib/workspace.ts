@@ -59,9 +59,11 @@ export interface Geometry {
 
 export interface StudyTestRun {
   id: string;
+  run_id: string | null;
   primary_for_reduction: boolean;
   analysis_time: string | null;
   test_date: string | null;
+  test_type: string | null;
   test_standard: string | null;
   operator: string | null;
   machine: string | null;
@@ -81,9 +83,30 @@ export interface StudyTestRun {
   result: AnalysisResponse | null;
 }
 
+export interface StudyConfiguration {
+  id: string;
+  label: string;
+  material: string | null;
+  material_lot: string | null;
+  printer: string | null;
+  print_profile: string | null;
+  nozzle: string | null;
+  nozzle_diameter_mm: number | null;
+  layer_height_mm: number | null;
+  orientation: string | null;
+  build_orientation: string | null;
+  raster_strategy: string | null;
+  infill_percent: number | null;
+  nozzle_temperature_c: number | null;
+  bed_temperature_c: number | null;
+  nominal_geometry: Geometry | null;
+  test_type: string | null;
+  test_standard_revision: string | null;
+}
+
 export interface StudyWorkspace {
   format: "styrkeanalyse-fdm-study";
-  version: 2;
+  version: 3;
   id?: string;
   revision?: number;
   saved_at?: string;
@@ -91,16 +114,10 @@ export interface StudyWorkspace {
   campaign: {
     id: string;
     name: string;
+    reduction_run_id: string | null;
     notes: string | null;
     created_at: string | null;
-    configurations: Array<{
-      id: string;
-      label: string;
-      material: string | null;
-      material_lot: string | null;
-      print_profile: string | null;
-      orientation: string | null;
-    }>;
+    configurations: StudyConfiguration[];
   };
   specimens: Array<{
     id: string;
@@ -116,12 +133,17 @@ const sensorSources: SensorSource[] = ["unknown", "extensometer", "crosshead", "
 const complianceMethods: ComplianceMethod[] = ["unknown", "not_required", "machine_compliance", "other"];
 const topLevelKeys = ["format", "version", "id", "revision", "saved_at", "study_name", "campaign", "specimens"];
 const legacyTopLevelKeys = ["format", "version", "id", "revision", "saved_at", "analysis_time", "study_name", "source_file_name", "columns", "rows", "settings", "result"];
-const campaignKeys = ["id", "name", "notes", "created_at", "configurations"];
-const configurationKeys = ["id", "label", "material", "material_lot", "print_profile", "orientation"];
+const campaignKeys = ["id", "name", "reduction_run_id", "notes", "created_at", "configurations"];
+const configurationKeys = [
+  "id", "label", "material", "material_lot", "printer", "print_profile", "nozzle",
+  "nozzle_diameter_mm", "layer_height_mm", "orientation", "build_orientation", "raster_strategy",
+  "infill_percent", "nozzle_temperature_c", "bed_temperature_c", "nominal_geometry", "test_type",
+  "test_standard_revision",
+];
 const specimenKeys = ["id", "label", "configuration_id", "geometry", "print_metadata", "test_runs"];
 const geometryKeys = ["width_mm", "thickness_mm", "gauge_length_mm"];
 const testRunKeys = [
-  "id", "primary_for_reduction", "analysis_time", "test_date", "test_standard", "operator",
+  "id", "run_id", "primary_for_reduction", "analysis_time", "test_date", "test_type", "test_standard", "operator",
   "machine", "load_cell", "sensor_source", "sensor_source_description", "compliance_correction",
   "input_file", "columns", "rows", "settings", "result",
 ];
@@ -311,7 +333,7 @@ function parseInputFile(value: unknown): InputFileProvenance {
 function parseV2(value: Record<string, unknown>): StudyWorkspace {
   onlyKeys(value, topLevelKeys, "workspace");
   if (
-    value.format !== "styrkeanalyse-fdm-study" || value.version !== 2 ||
+    value.format !== "styrkeanalyse-fdm-study" || value.version !== 2 && value.version !== 3 ||
     typeof value.study_name !== "string" || !value.study_name.trim() || !isRecord(value.campaign) ||
     !Array.isArray(value.specimens) || value.specimens.length === 0
   ) {
@@ -321,7 +343,9 @@ function parseV2(value: Record<string, unknown>): StudyWorkspace {
   onlyKeys(campaign, campaignKeys, "campaign");
   if (
     typeof campaign.id !== "string" || !campaign.id || typeof campaign.name !== "string" ||
-    !campaign.name.trim() || !Array.isArray(campaign.configurations) || campaign.configurations.length === 0
+    !campaign.name.trim() || !Array.isArray(campaign.configurations) || campaign.configurations.length === 0 ||
+    campaign.reduction_run_id != null && (typeof campaign.reduction_run_id !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(campaign.reduction_run_id))
   ) {
     throw new Error("The workspace contains invalid campaign metadata.");
   }
@@ -331,17 +355,53 @@ function parseV2(value: Record<string, unknown>): StudyWorkspace {
       typeof configuration.label !== "string" || !configuration.label.trim()) {
       throw new Error("The workspace contains an invalid campaign configuration.");
     }
-    const optionalText = [configuration.material, configuration.material_lot, configuration.print_profile, configuration.orientation];
+    const optionalText = [
+      configuration.material, configuration.material_lot, configuration.printer,
+      configuration.print_profile, configuration.nozzle, configuration.orientation,
+      configuration.build_orientation, configuration.raster_strategy, configuration.test_type,
+      configuration.test_standard_revision,
+    ];
     if (optionalText.some((item) => item !== null && item !== undefined && typeof item !== "string")) {
       throw new Error("The workspace contains invalid optional configuration text.");
+    }
+    const optionalNumber = (key: string): number | null => {
+      const raw = configuration[key];
+      if (raw === null || raw === undefined) return null;
+      if (!isFiniteNumber(raw)) throw new Error(`The workspace contains an invalid configuration value: ${key}.`);
+      return raw;
+    };
+    const nozzleDiameter = optionalNumber("nozzle_diameter_mm");
+    const layerHeight = optionalNumber("layer_height_mm");
+    const infill = optionalNumber("infill_percent");
+    const nozzleTemperature = optionalNumber("nozzle_temperature_c");
+    const bedTemperature = optionalNumber("bed_temperature_c");
+    if (
+      nozzleDiameter !== null && nozzleDiameter <= 0 || layerHeight !== null && layerHeight <= 0 ||
+      infill !== null && (infill < 0 || infill > 100)
+    ) {
+      throw new Error("The workspace contains an out-of-range configuration process value.");
     }
     return {
       id: configuration.id,
       label: configuration.label,
       material: typeof configuration.material === "string" ? configuration.material : null,
       material_lot: typeof configuration.material_lot === "string" ? configuration.material_lot : null,
+      printer: typeof configuration.printer === "string" ? configuration.printer : null,
       print_profile: typeof configuration.print_profile === "string" ? configuration.print_profile : null,
+      nozzle: typeof configuration.nozzle === "string" ? configuration.nozzle : null,
+      nozzle_diameter_mm: nozzleDiameter,
+      layer_height_mm: layerHeight,
       orientation: typeof configuration.orientation === "string" ? configuration.orientation : null,
+      build_orientation: typeof configuration.build_orientation === "string" ? configuration.build_orientation : null,
+      raster_strategy: typeof configuration.raster_strategy === "string" ? configuration.raster_strategy : null,
+      infill_percent: infill,
+      nozzle_temperature_c: nozzleTemperature,
+      bed_temperature_c: bedTemperature,
+      nominal_geometry: configuration.nominal_geometry == null ? null : parseGeometry(configuration.nominal_geometry),
+      test_type: typeof configuration.test_type === "string" ? configuration.test_type : null,
+      test_standard_revision: typeof configuration.test_standard_revision === "string"
+        ? configuration.test_standard_revision
+        : null,
     };
   });
   const configurationIds = configurations.map(({ id }) => id);
@@ -365,6 +425,7 @@ function parseV2(value: Record<string, unknown>): StudyWorkspace {
     const testRuns = specimenValue.test_runs.map((runValue) => {
       if (isRecord(runValue)) onlyKeys(runValue, testRunKeys, "test run");
       if (!isRecord(runValue) || typeof runValue.id !== "string" || !runValue.id ||
+        runValue.run_id != null && (typeof runValue.run_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(runValue.run_id)) ||
         !sensorSources.includes(runValue.sensor_source as SensorSource) ||
         !isRecord(runValue.compliance_correction) || !Array.isArray(runValue.columns)) {
         throw new Error("The workspace contains invalid test-run metadata.");
@@ -399,7 +460,7 @@ function parseV2(value: Record<string, unknown>): StudyWorkspace {
       if (
         runValue.test_date != null && !isDateOnly(runValue.test_date) ||
         runValue.analysis_time != null && !isIsoTimestamp(runValue.analysis_time) ||
-        [runValue.test_standard, runValue.operator, runValue.machine, runValue.load_cell, runValue.sensor_source_description]
+        [runValue.test_type, runValue.test_standard, runValue.operator, runValue.machine, runValue.load_cell, runValue.sensor_source_description]
           .some((item) => item != null && typeof item !== "string")
       ) {
         throw new Error("The workspace contains invalid test date or descriptive metadata.");
@@ -418,9 +479,11 @@ function parseV2(value: Record<string, unknown>): StudyWorkspace {
       }
       return {
         id: runValue.id,
+        run_id: typeof runValue.run_id === "string" ? runValue.run_id : null,
         primary_for_reduction: runValue.primary_for_reduction !== false,
         analysis_time: runValue.analysis_time as string | null ?? null,
         test_date: runValue.test_date as string | null ?? null,
+        test_type: typeof runValue.test_type === "string" ? runValue.test_type : null,
         test_standard: typeof runValue.test_standard === "string" ? runValue.test_standard : null,
         operator: typeof runValue.operator === "string" ? runValue.operator : null,
         machine: typeof runValue.machine === "string" ? runValue.machine : null,
@@ -452,6 +515,71 @@ function parseV2(value: Record<string, unknown>): StudyWorkspace {
       test_runs: testRuns,
     };
   });
+  const controlledPrintFields: Array<[keyof StudyConfiguration, keyof PrintMetadata]> = [
+    ["material", "material"],
+    ["material_lot", "material_lot"],
+    ["printer", "printer"],
+    ["nozzle", "nozzle"],
+    ["nozzle_diameter_mm", "nozzle_diameter_mm"],
+    ["layer_height_mm", "layer_height_mm"],
+    ["raster_strategy", "raster_orientation"],
+    ["infill_percent", "infill_percent"],
+    ["nozzle_temperature_c", "nozzle_temperature_c"],
+    ["bed_temperature_c", "bed_temperature_c"],
+  ];
+  for (const configuration of configurations) {
+    const group = specimens.filter((specimen) => specimen.configuration_id === configuration.id);
+    for (const [configurationField, specimenField] of controlledPrintFields) {
+      const observed = [...new Set(group
+        .map((specimen) => specimen.print_metadata[specimenField])
+        .filter((item) => item !== null && item !== ""))];
+      const configured = configuration[configurationField] as string | number | null;
+      if (configured !== null && observed.some((item) => item !== configured)) {
+        throw new Error(`Specimen print metadata conflicts with configuration ${configuration.id}.`);
+      }
+      if (observed.length > 1) {
+        throw new Error(`Incompatible ${String(configurationField)} values require separate configurations.`);
+      }
+      if (configured === null && observed.length === 1) {
+        Object.assign(configuration, { [configurationField]: observed[0] });
+      }
+    }
+    if (configuration.raster_strategy !== null && configuration.orientation !== null &&
+        configuration.raster_strategy !== configuration.orientation) {
+      throw new Error(`Configuration ${configuration.id} has conflicting raster strategy values.`);
+    }
+    const raster = configuration.raster_strategy ?? configuration.orientation;
+    if (raster !== null && group.some((specimen) =>
+      specimen.print_metadata.raster_orientation !== null && specimen.print_metadata.raster_orientation !== raster,
+    )) {
+      throw new Error(`Specimen raster strategy conflicts with configuration ${configuration.id}.`);
+    }
+    if (configuration.raster_strategy === null && raster !== null) configuration.raster_strategy = raster;
+    const observedStandards = [...new Set(group.flatMap((specimen) =>
+      specimen.test_runs.map((run) => run.test_standard).filter((item): item is string => Boolean(item)),
+    ))];
+    if (configuration.test_standard_revision !== null &&
+        observedStandards.some((item) => item !== configuration.test_standard_revision)) {
+      throw new Error(`Test standards conflict with configuration ${configuration.id}.`);
+    }
+    if (observedStandards.length > 1) throw new Error("Incompatible test standards require separate configurations.");
+    if (configuration.test_standard_revision === null && observedStandards.length === 1) {
+      configuration.test_standard_revision = observedStandards[0];
+    }
+    const observedTypes = [...new Set(group.flatMap((specimen) =>
+      specimen.test_runs.map((run) => run.test_type).filter((item): item is string => Boolean(item)),
+    ))];
+    if (configuration.test_type !== null && observedTypes.some((item) => item !== configuration.test_type)) {
+      throw new Error(`Test types conflict with configuration ${configuration.id}.`);
+    }
+    if (observedTypes.length > 1) throw new Error("Incompatible test types require separate configurations.");
+    if (configuration.test_type === null && observedTypes.length === 1) configuration.test_type = observedTypes[0];
+    for (const specimen of group) {
+      Object.assign(specimen.print_metadata, Object.fromEntries(
+        controlledPrintFields.map(([, specimenField]) => [specimenField, null]),
+      ));
+    }
+  }
   if (value.id !== undefined && typeof value.id !== "string") throw new Error("The workspace contains an invalid study ID.");
   if (value.revision !== undefined && (!Number.isSafeInteger(value.revision) || Number(value.revision) < 1)) {
     throw new Error("The workspace contains an invalid study revision.");
@@ -465,7 +593,7 @@ function parseV2(value: Record<string, unknown>): StudyWorkspace {
   }
   return {
     format: "styrkeanalyse-fdm-study",
-    version: 2,
+    version: 3,
     id: value.id as string | undefined,
     revision: value.revision as number | undefined,
     saved_at: (value.saved_at ?? undefined) as string | undefined,
@@ -473,6 +601,7 @@ function parseV2(value: Record<string, unknown>): StudyWorkspace {
     campaign: {
       id: campaign.id,
       name: campaign.name,
+      reduction_run_id: typeof campaign.reduction_run_id === "string" ? campaign.reduction_run_id : null,
       notes: campaign.notes as string | null | undefined ?? null,
       created_at: campaign.created_at as string | null | undefined ?? null,
       configurations,
@@ -521,7 +650,7 @@ function migrateV1(workspace: Record<string, unknown>): StudyWorkspace {
   const sourceName = workspace.source_file_name.trim() || "Unknown legacy input file";
   const migrated: StudyWorkspace = {
     format: "styrkeanalyse-fdm-study",
-    version: 2,
+    version: 3,
     id: typeof workspace.id === "string" ? workspace.id : undefined,
     revision: Number.isSafeInteger(workspace.revision) && Number(workspace.revision) >= 1
       ? Number(workspace.revision)
@@ -531,6 +660,7 @@ function migrateV1(workspace: Record<string, unknown>): StudyWorkspace {
     campaign: {
       id: "legacy-campaign",
       name: workspace.study_name,
+      reduction_run_id: null,
       notes: null,
       created_at: null,
       configurations: [{
@@ -538,8 +668,20 @@ function migrateV1(workspace: Record<string, unknown>): StudyWorkspace {
         label: "Legacy configuration",
         material: null,
         material_lot: null,
+        printer: null,
         print_profile: null,
+        nozzle: null,
+        nozzle_diameter_mm: null,
+        layer_height_mm: null,
         orientation: null,
+        build_orientation: null,
+        raster_strategy: null,
+        infill_percent: null,
+        nozzle_temperature_c: null,
+        bed_temperature_c: null,
+        nominal_geometry: null,
+        test_type: null,
+        test_standard_revision: null,
       }],
     },
     specimens: [{
@@ -554,9 +696,11 @@ function migrateV1(workspace: Record<string, unknown>): StudyWorkspace {
       print_metadata: Object.fromEntries(printMetadataKeys.map((key) => [key, null])) as unknown as PrintMetadata,
       test_runs: [{
         id: "legacy-test-run",
+        run_id: null,
         primary_for_reduction: true,
         analysis_time: typeof workspace.analysis_time === "string" ? workspace.analysis_time : null,
         test_date: null,
+        test_type: null,
         test_standard: null,
         operator: null,
         machine: null,
@@ -602,6 +746,8 @@ export function parseWorkspaceText(text: string): StudyWorkspace {
     throw new Error("This is not a supported StyrkeAnalyse study workspace.");
   }
   if (value.version === 1) return migrateV1(value);
-  if (value.version !== 2) throw new Error("This is not a supported StyrkeAnalyse study workspace.");
+  if (value.version !== 2 && value.version !== 3) {
+    throw new Error("This is not a supported StyrkeAnalyse study workspace.");
+  }
   return parseV2(value);
 }

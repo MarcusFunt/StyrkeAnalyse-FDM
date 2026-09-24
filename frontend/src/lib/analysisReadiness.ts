@@ -41,6 +41,7 @@ export function analysisInputFingerprint(value: {
   settings: unknown;
   inputSha256: string | null;
   specimenId: string;
+  reductionMetadata?: unknown;
 }): string {
   return JSON.stringify(value);
 }

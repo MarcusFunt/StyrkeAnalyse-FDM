@@ -14,9 +14,13 @@ The project currently has three local development environments:
 - `fenicsx` provides DOLFINx/PETSc/MPI, CalculiX, Gmsh, and JupyterLab.
 - `rve` provides Python 3.10 and JupyterLab as an extension point for future
   voxel and homogenisation work. It does not currently contain VOLCO or fedoo.
-- `gui` serves the browser interface, runs the tensile baseline and stores saved
-  study workspaces on the desktop host. It can be shared privately over
-  Tailscale Serve while remaining bound to host loopback.
+- `gui` serves the browser interface, edits campaign workspaces, and proxies Run
+  and artifact requests without doing mechanics calculations.
+- `runner` stores immutable Run records and content-addressed artifacts, then
+  invokes the pinned experimental-reduction image through the Docker engine.
+- `exp-reduction` is the first one-shot scientific stage image. It preserves
+  the uploaded CSV bytes and emits result and stage-provenance artifacts.
+  `gui` can be shared privately over Tailscale Serve while bound to host loopback.
 
 The GUI workflow imports tensile CSV/TSV files, validates column mappings and
 specimen dimensions, and stores a versioned campaign/specimen record with test,
@@ -104,26 +108,36 @@ docker compose run --rm fenicsx scripts/verify-environment.sh
 
 The browser interface and its saved studies can run on an always-on desktop. Open
 it from a phone or laptop on your Tailscale network; the app itself is not
-published to the public internet.
+published to the public internet. Formal runs are executed in a network-disabled
+stage container. The internal runner needs access to the Docker engine socket to
+create that isolated container; Compose does not publish the runner API to the
+host.
 
 1. On the desktop, clone or update this repository and configure the existing
    `.env` file as described above. Compose requires `JUPYTER_TOKEN` even when
    starting only the GUI because the other notebook services are part of the
    same Compose project.
-2. Build and start the GUI in the background:
+2. In the shell where you run Compose, record the checked-out revision on the
+   images. These labels are copied into immutable stage provenance:
 
    ```bash
-   docker compose build gui
-   docker compose up -d gui
-   docker compose ps gui
-   docker compose logs -f gui
+   export GIT_COMMIT="$(git rev-parse HEAD)"
+   if [ -n "$(git status --porcelain)" ]; then export GIT_DIRTY=true; else export GIT_DIRTY=false; fi
    ```
 
-   The GUI listens on host loopback port 8010. Its saved studies are stored in
-   the persistent `gui_data` Docker volume. In the app, use **Save on desktop**
-   after importing a test to keep the measurements and results on the host;
-   **Export file** downloads a portable workspace to the device running the
-   browser.
+   Build all three images and start the GUI plus runner:
+
+   ```bash
+   docker compose build gui runner exp-reduction
+   docker compose up -d gui runner
+   docker compose ps gui runner
+   docker compose logs -f gui runner
+   ```
+
+   The GUI listens on host loopback port 8010. Saved studies, Run records, and
+   content-addressed artifacts share the persistent `gui_data` Docker volume.
+   In the app, use **Save on desktop** to keep studies on the host; **Export
+   file** downloads a portable workspace to the device running the browser.
 3. Install Tailscale on the desktop and sign it in to your tailnet. Install it
    on your phone and laptop and sign those into the same tailnet. On the
    operating system that runs Tailscale on the desktop, run:
