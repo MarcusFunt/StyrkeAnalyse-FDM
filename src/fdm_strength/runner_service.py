@@ -688,6 +688,12 @@ def _send_archive_to_work(
     timer.start()
     try:
         sendall = getattr(transfer_socket, "sendall", None)
+        raw_socket = None
+        if not callable(sendall):
+            # docker-py returns a read-only SocketIO wrapper for Unix socket
+            # exec streams, even though the wrapped socket is duplex.
+            raw_socket = getattr(transfer_socket, "_sock", None)
+            sendall = getattr(raw_socket, "sendall", None)
         if callable(sendall):
             sendall(archive)
         else:
@@ -701,6 +707,8 @@ def _send_archive_to_work(
                     raise OSError("Docker input stream stopped accepting stage files")
                 remaining = remaining[written:]
         shutdown = getattr(transfer_socket, "shutdown", None)
+        if not callable(shutdown):
+            shutdown = getattr(raw_socket, "shutdown", None)
         if callable(shutdown):
             try:
                 shutdown(socket.SHUT_WR)

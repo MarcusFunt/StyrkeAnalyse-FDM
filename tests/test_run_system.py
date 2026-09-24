@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import socket
 from datetime import datetime, timezone
 from threading import Thread
 from urllib.request import Request, urlopen
@@ -172,6 +173,34 @@ def test_archive_transfer_supports_file_like_docker_sockets():
 
     assert bytes(stream.received) == payload
     assert stream.closed
+
+
+def test_archive_transfer_uses_writable_socket_inside_read_only_socketio():
+    sender, receiver = socket.socketpair()
+    stream = socket.SocketIO(sender, "r")
+
+    class FakeDockerAPI:
+        def exec_create(self, *_args, **_kwargs):
+            return {"Id": "transfer-exec"}
+
+        def exec_start(self, *_args, **_kwargs):
+            return stream
+
+        def exec_inspect(self, _exec_id):
+            return {"ExitCode": 0, "Running": False}
+
+    class FakeContainer:
+        id = "stage-container"
+
+    payload = b"contract and source archive"
+    client = type("FakeDockerClient", (), {"api": FakeDockerAPI()})()
+
+    try:
+        _send_archive_to_work(client, FakeContainer(), payload, timeout_seconds=1)
+        assert receiver.recv(len(payload)) == payload
+        assert receiver.recv(1) == b""
+    finally:
+        receiver.close()
 
 
 def test_runner_creates_a_run_and_replay_uses_saved_artifacts_and_image(tmp_path):
