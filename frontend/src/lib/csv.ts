@@ -16,6 +16,7 @@ export function parseCsvText(source: string): ParsedCsv {
     header: false,
     skipEmptyLines: "greedy",
     dynamicTyping: false,
+    delimitersToGuess: [",", ";", "\t", "|"],
   });
   const [rawHeader, ...dataRows] = parsed.data;
   if (!rawHeader?.length) {

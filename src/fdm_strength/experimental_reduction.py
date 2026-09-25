@@ -92,17 +92,29 @@ def analyze_uploaded_csv(content: bytes, parameters: dict[str, Any]) -> dict[str
     }
 
 
-def reduce_campaign_workspace(payload: dict[str, Any]) -> dict[str, Any]:
+def reduce_campaign_workspace(
+    payload: dict[str, Any],
+    upstream_results: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Aggregate immutable specimen reductions into campaign statistics.
+
+    Once a specimen is linked to a formal tensile Run, the editable workspace is
+    only the campaign/index document. Numerical campaign values come exclusively
+    from the linked Run result artifacts supplied by the runner.
+    """
     try:
         normalized = migrate_workspace_v2_to_v3(payload) if payload.get("version") == 2 else payload
         workspace = StudyWorkspaceV3.model_validate(normalized)
     except (ValidationError, ValueError) as error:
         raise ValueError(f"Invalid campaign workspace: {error}") from error
+    if not isinstance(upstream_results, dict):
+        raise ValueError("campaign upstream results must be an object")
 
     configurations = {item.id: item for item in workspace.campaign.configurations}
     reductions_by_configuration: dict[str, list[SpecimenModulus]] = {
         configuration_id: [] for configuration_id in configurations
     }
+    referenced_run_ids: set[str] = set()
     for specimen in workspace.specimens:
         primary = next((run for run in specimen.test_runs if run.primary_for_reduction), None)
         if primary is None:
@@ -112,50 +124,90 @@ def reduce_campaign_workspace(payload: dict[str, Any]) -> dict[str, Any]:
                 status="ineligible",
                 reason="No primary test run is selected for reduction.",
             )
+        elif primary.run_id is None:
+            reduction = SpecimenModulus(
+                specimen_id=specimen.id,
+                modulus_mpa=None,
+                status="ineligible",
+                reason="Primary test run is not linked to an immutable tensile Run.",
+            )
         else:
-            try:
-                settings = primary.settings
-                analysis = analyze_tensile_rows(
-                    rows=primary.rows,
-                    force_column=settings.get("forceColumn"),
-                    displacement_column=settings.get("displacementColumn"),
-                    width_mm=specimen.geometry.width_mm,
-                    thickness_mm=specimen.geometry.thickness_mm,
-                    gauge_length_mm=specimen.geometry.gauge_length_mm,
-                    force_unit=settings.get("forceUnit", "N"),
-                    displacement_unit=settings.get("displacementUnit", "mm"),
-                    decimal_separator=settings.get("decimalSeparator", "."),
-                    tension_direction=settings.get("tensionDirection", "positive"),
+            referenced_run_ids.add(primary.run_id)
+            immutable_result = upstream_results.get(primary.run_id)
+            if immutable_result is None:
+                raise ValueError(
+                    f"immutable result for linked tensile Run {primary.run_id} is missing"
                 )
-                reduction = reduce_tensile_modulus(
-                    specimen.id,
-                    analysis["points"],
-                    gauge_length_mm=specimen.geometry.gauge_length_mm,
-                    sensor_source=primary.sensor_source.value,
-                    compliance_correction=primary.compliance_correction.model_dump(mode="python"),
-                )
-            except (TypeError, ValueError) as error:
-                reduction = SpecimenModulus(
-                    specimen_id=specimen.id,
-                    modulus_mpa=None,
-                    status="ineligible",
-                    reason=str(error),
-                )
+            reduction = _specimen_modulus_from_immutable_result(
+                specimen.id,
+                primary.run_id,
+                immutable_result,
+            )
         reductions_by_configuration[specimen.configuration_id].append(reduction)
+
+    unexpected = set(upstream_results) - referenced_run_ids
+    if unexpected:
+        raise ValueError(
+            "campaign received immutable results for unreferenced Runs: "
+            + ", ".join(sorted(unexpected))
+        )
 
     summaries = []
     for configuration_id, configuration in configurations.items():
         reductions = reductions_by_configuration[configuration_id]
         aggregate: CampaignModulus = aggregate_modulus(reductions)
+        aggregate_payload = asdict(aggregate)
+        # Keep schema-v1 consumers readable while the canonical name changes.
+        aggregate_payload["ready_for_validation"] = aggregate.replicate_ready
         summaries.append(
             {
                 "configuration_id": configuration_id,
                 "configuration_label": configuration.label,
                 "specimen_reductions": [asdict(reduction) for reduction in reductions],
-                "aggregate": asdict(aggregate),
+                "aggregate": aggregate_payload,
             }
         )
     return {"campaign_name": workspace.campaign.name, "configurations": summaries}
+
+
+def _specimen_modulus_from_immutable_result(
+    specimen_id: str,
+    run_id: str,
+    immutable_result: dict[str, Any],
+) -> SpecimenModulus:
+    if not isinstance(immutable_result, dict):
+        raise ValueError(f"linked Run {run_id} result must be an object")
+    raw = immutable_result.get("specimen_reduction")
+    if not isinstance(raw, dict):
+        raise ValueError(f"linked Run {run_id} omitted specimen_reduction")
+    if raw.get("specimen_id") != specimen_id:
+        raise ValueError(
+            f"linked Run {run_id} specimen reduction belongs to a different specimen"
+        )
+    interval = raw.get("strain_interval", (0.0005, 0.0025))
+    if (
+        not isinstance(interval, (list, tuple))
+        or len(interval) != 2
+        or any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in interval)
+    ):
+        raise ValueError(f"linked Run {run_id} has an invalid strain interval")
+    status = raw.get("status")
+    if status not in {"eligible", "ineligible"}:
+        raise ValueError(f"linked Run {run_id} has an invalid specimen reduction status")
+    modulus = raw.get("modulus_mpa")
+    if modulus is not None and (
+        isinstance(modulus, bool) or not isinstance(modulus, (int, float))
+    ):
+        raise ValueError(f"linked Run {run_id} has an invalid modulus")
+    return SpecimenModulus(
+        specimen_id=specimen_id,
+        modulus_mpa=float(modulus) if modulus is not None else None,
+        status=status,
+        reason=raw.get("reason") if isinstance(raw.get("reason"), str) else None,
+        strain_interval=(float(interval[0]), float(interval[1])),
+        sensor_source=str(raw.get("sensor_source", "unknown")),
+        correction_method=str(raw.get("correction_method", "unknown")),
+    )
 
 
 def _analysis_parameters(parameters: dict[str, Any]) -> dict[str, Any]:

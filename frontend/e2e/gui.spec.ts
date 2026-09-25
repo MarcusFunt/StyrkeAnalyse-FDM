@@ -1,5 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { clearBrowserTestStudies } from "./helpers";
 
 const modulusCsv = Buffer.from([
@@ -24,6 +24,17 @@ test.beforeEach(async ({ page, request }) => {
 test.afterEach(async ({ page }) => {
   expect(browserErrors.get(page) ?? []).toEqual([]);
 });
+
+async function waitForJob(request: APIRequestContext, jobId: string): Promise<any> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const response = await request.get(`/api/jobs/${jobId}`);
+    const payload = await response.json();
+    if (payload.job?.status === "succeeded") return payload;
+    if (payload.job?.status === "failed") throw new Error(payload.job?.error ?? "Runner job failed");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Runner job ${jobId} did not finish`);
+}
 
 async function importFixture(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Data and setup" }).click();
@@ -83,7 +94,9 @@ test("import, analyse, save, reload, and check accessibility", async ({ page, re
   const resultResponse = await request.get(`/api/artifacts/${tensileRun.result_artifact.sha256}`);
   const resultArtifact = JSON.parse((await resultResponse.body()).toString());
   const replayResponse = await request.post(`${tensileRunPath}/replay`, { data: {} });
-  const replay = await replayResponse.json();
+  expect(replayResponse.status()).toBe(202);
+  const replayQueued = await replayResponse.json();
+  const replay = await waitForJob(request, replayQueued.job.id as string);
   expect(replay.result).toEqual(resultArtifact.result);
   const campaignResponse = await request.get(campaignRunPath!);
   const campaignRun = (await campaignResponse.json()).run;

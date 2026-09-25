@@ -79,6 +79,7 @@ jobs:
           import base64
           import hashlib
           import json
+          import time
           from urllib.request import Request, urlopen
 
           source = b"force_N,displacement_mm\n0,0\n12,0.0125\n24,0.025\n"
@@ -104,14 +105,27 @@ jobs:
               with urlopen(request, timeout=180) as response:
                   return json.load(response)
 
-          run_response = call(
+          def wait_job(job_id):
+              deadline = time.monotonic() + 180
+              while time.monotonic() < deadline:
+                  current = call(f"http://127.0.0.1:18010/api/jobs/{job_id}")
+                  if current["job"]["status"] == "succeeded":
+                      return current
+                  if current["job"]["status"] == "failed":
+                      raise AssertionError(current)
+                  time.sleep(0.1)
+              raise AssertionError(f"job {job_id} timed out")
+
+          queued = call(
               "http://127.0.0.1:18010/api/runs",
               json.dumps(payload).encode(),
           )
+          run_response = wait_job(queued["job"]["id"])
           assert run_response["run"]["status"] == "succeeded", run_response
           assert len(run_response["run"]["stages"][0]["output_artifacts"]) == 2
           run_id = run_response["run"]["id"]
-          replay = call(f"http://127.0.0.1:18010/api/runs/{run_id}/replay", b"{}")
+          replay_queued = call(f"http://127.0.0.1:18010/api/runs/{run_id}/replay", b"{}")
+          replay = wait_job(replay_queued["job"]["id"])
           assert replay["run"]["status"] == "succeeded", replay
           assert replay["result"] == run_response["result"]
           print("GUI-to-runner stage execution and immutable replay succeeded")

@@ -25,16 +25,38 @@ def main() -> int:
             result = analyze_uploaded_csv(source, contract.parameters)
         elif contract.operation == "campaign":
             source = inputs.get("workspace.json")
-            if source is None:
-                raise ValueError("campaign stage requires workspace.json")
+            upstream_source = inputs.get("upstream-results.json")
+            if source is None or upstream_source is None:
+                raise ValueError(
+                    "campaign stage requires workspace.json and upstream-results.json"
+                )
             try:
                 payload = json.loads(source)
+                upstream_payload = json.loads(upstream_source)
             except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                raise ValueError("campaign workspace input is not valid UTF-8 JSON") from error
+                raise ValueError("campaign inputs must be valid UTF-8 JSON") from error
             if not isinstance(payload, dict):
                 raise ValueError("campaign workspace input must be a JSON object")
-            result = reduce_campaign_workspace(payload)
-        else:  # pragma: no cover - the contract enum prevents this
+            if (
+                not isinstance(upstream_payload, dict)
+                or upstream_payload.get("schema_version") != 1
+                or not isinstance(upstream_payload.get("runs"), dict)
+            ):
+                raise ValueError("campaign upstream result manifest is invalid")
+            upstream_results: dict[str, dict[str, object]] = {}
+            for run_id, entry in upstream_payload["runs"].items():
+                if (
+                    not isinstance(run_id, str)
+                    or not isinstance(entry, dict)
+                    or not isinstance(entry.get("result_artifact_sha256"), str)
+                    or not isinstance(entry.get("specimen_reduction"), dict)
+                ):
+                    raise ValueError("campaign upstream result manifest contains an invalid entry")
+                upstream_results[run_id] = {
+                    "specimen_reduction": entry["specimen_reduction"]
+                }
+            result = reduce_campaign_workspace(payload, upstream_results)
+        else:  # pragma: no cover - the stage registry prevents this
             raise ValueError(f"unsupported experimental-reduction operation {contract.operation}")
 
         output_bytes = (

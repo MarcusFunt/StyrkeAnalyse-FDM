@@ -387,9 +387,9 @@ def test_web_api_migrates_v2_campaign_metadata_before_persisting(tmp_path):
 
 def test_campaign_reduction_stage_counts_specimens_not_measurement_rows_and_applies_gate():
     specimens = []
+    upstream_results = {}
     for index, modulus in enumerate([2000, 2100, 1900, 2000, 2000], start=1):
-        strains = [0, 0.001, 0.003]
-        forces = [modulus * strain * 20 for strain in strains]
+        run_id = f"00000000-0000-4000-8000-{index:012d}"
         specimens.append(
             {
                 "id": f"S{index:02}",
@@ -400,6 +400,7 @@ def test_campaign_reduction_stage_counts_specimens_not_measurement_rows_and_appl
                 "test_runs": [
                     {
                         "id": f"run-{index}",
+                        "run_id": run_id,
                         "primary_for_reduction": True,
                         "sensor_source": "extensometer",
                         "compliance_correction": {"method": "not_required"},
@@ -408,15 +409,24 @@ def test_campaign_reduction_stage_counts_specimens_not_measurement_rows_and_appl
                             "status": "unavailable_legacy",
                         },
                         "columns": ["F", "D"],
-                        "rows": [
-                            {"F": str(force), "D": str(strain * 50)}
-                            for force, strain in zip(forces, strains, strict=True)
-                        ],
+                        # These copied rows are intentionally not used by campaign reduction.
+                        "rows": [{"F": "999999", "D": "999999"}],
                         "settings": {"forceColumn": "F", "displacementColumn": "D"},
                     }
                 ],
             }
         )
+        upstream_results[run_id] = {
+            "specimen_reduction": {
+                "specimen_id": f"S{index:02}",
+                "modulus_mpa": modulus,
+                "status": "eligible",
+                "reason": None,
+                "strain_interval": [0.0005, 0.0025],
+                "sensor_source": "extensometer",
+                "correction_method": "not_required",
+            }
+        }
     payload = {
         "format": "styrkeanalyse-fdm-study",
         "version": 2,
@@ -429,13 +439,13 @@ def test_campaign_reduction_stage_counts_specimens_not_measurement_rows_and_appl
         "specimens": specimens,
     }
 
-    result = reduce_campaign_workspace(payload)
+    result = reduce_campaign_workspace(payload, upstream_results)
 
     aggregate = result["configurations"][0]["aggregate"]
     assert aggregate["n_total"] == 5
     assert aggregate["n_valid"] == 5
     assert aggregate["mean_mpa"] == pytest.approx(2000)
-    assert aggregate["ready_for_validation"] is True
+    assert aggregate["replicate_ready"] is True
 
 
 def test_study_updates_use_etag_revisions_and_reject_stale_writes(tmp_path):
