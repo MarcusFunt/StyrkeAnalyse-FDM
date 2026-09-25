@@ -16,10 +16,14 @@ The project currently has three local development environments:
   voxel and homogenisation work. It does not currently contain VOLCO or fedoo.
 - `gui` serves the browser interface, edits campaign workspaces, and proxies Run
   and artifact requests without doing mechanics calculations.
-- `runner` stores immutable Run records and content-addressed artifacts, then
-  invokes the pinned experimental-reduction image through the Docker engine.
+- `runner` owns a server-side allowlist of scientific stages, queues work
+  asynchronously, stores immutable Run records and content-addressed artifacts,
+  and invokes stage images through the Docker engine. Browser requests cannot
+  choose arbitrary images, commands, or resource limits.
 - `exp-reduction` is the first one-shot scientific stage image. It preserves
   the uploaded CSV bytes and emits result and stage-provenance artifacts.
+  Campaign reduction consumes the immutable result artifacts of the selected
+  specimen Runs rather than recalculating from editable workspace row copies.
   `gui` can be shared privately over Tailscale Serve while bound to host loopback.
 - `fdm_strength.toolpath` parses supported linear G-code moves into an immutable,
   hashed, millimetre-based `ToolpathModel`. It records deposition and travel
@@ -30,12 +34,16 @@ specimen dimensions, and stores a versioned campaign/specimen record with test,
 print, sensor, compliance, and input-file hash metadata. It computes a nominal
 tensile baseline and a chord modulus per eligible physical specimen, then shows
 mean, sample standard deviation, coefficient of variation, and the five-specimen
-campaign-readiness check. Desktop saves use revisions to detect conflicting
-edits; deleted studies can be restored during the selected retention period.
+replicate-readiness check. This is deliberately not called model-validation
+readiness: solver verification, calibration/validation separation, and held-out
+prediction evidence are separate gates. Desktop saves use revisions to detect
+conflicting edits; deleted studies can be restored during the selected retention
+period.
 
 Solver-independent reference modules now cover tensile and three-point-bend
-formulas, classical laminate theory, transversely isotropic stiffness and
-failure-index calculations, plus analytical fracture conversions and a
+formulas, classical laminate theory, general 3D orthotropic stiffness (with a
+transversely isotropic specialization) and failure-index calculations, plus
+analytical fracture conversions and a
 bilinear cohesive envelope. These are calculation references with unit tests;
 they are not validated simulation models.
 
@@ -112,10 +120,12 @@ docker compose run --rm fenicsx scripts/verify-environment.sh
 
 The browser interface and its saved studies can run on an always-on desktop. Open
 it from a phone or laptop on your Tailscale network; the app itself is not
-published to the public internet. Formal runs are executed in a network-disabled
-stage container. The internal runner needs access to the Docker engine socket to
-create that isolated container; Compose does not publish the runner API to the
-host.
+published to the public internet. Formal runs are queued as persistent jobs and
+executed in a network-disabled stage container. The GUI receives a job ID
+immediately and polls for completion,
+so future FEM/RVE stages do not need to hold one HTTP request open for minutes or
+hours. The internal runner needs access to the Docker engine socket to create the
+isolated container; Compose does not publish the runner API to the host.
 
 1. On the desktop, clone or update this repository and configure the existing
    `.env` file as described above. Compose requires `JUPYTER_TOKEN` even when
@@ -138,10 +148,12 @@ host.
    docker compose logs -f gui runner
    ```
 
-   The GUI listens on host loopback port 8010. Saved studies, Run records, and
-   content-addressed artifacts share the persistent `gui_data` Docker volume.
-   In the app, use **Save on desktop** to keep studies on the host; **Export
-   file** downloads a portable workspace to the device running the browser.
+   The GUI listens on host loopback port 8010. Saved studies, queued job records,
+   immutable Runs, and content-addressed artifacts share the persistent
+   `gui_data` Docker volume. In the app, use **Save on desktop** to keep the
+   complete local references. **Export file** creates a portable workspace and
+   deliberately detaches desktop-local Run IDs; a future research-bundle export
+   can carry Runs and artifacts together.
 3. Install Tailscale on the desktop and sign it in to your tailnet. Install it
    on your phone and laptop and sign those into the same tailnet. On the
    operating system that runs Tailscale on the desktop, run:
@@ -166,17 +178,23 @@ start when you sign in. Compose uses `restart: unless-stopped`, so the GUI
 container comes back when Docker starts. If the desktop is asleep or powered
 off, remote access is unavailable.
 
-This release runs tensile baseline and replicate reduction workflows and stores
-saved workspaces on the desktop. It does not submit or monitor FEM simulation
-jobs. Stage provenance v2 records the resolved stage image ID, dependency-lock
-hash, contract and artifact hashes, source revision, runtime, and CPU/thread
-allocation for formal reduction runs. The DOLFINx development base image is
-pinned by digest. The solver verification gate remains red until actual
-DOLFINx/CalculiX solver images produce recorded convergence, patch-test,
-analytical-agreement, and cross-solver evidence. FEM-versus-experiment
-comparison is not available before then. The GUI itself does not use the GPU,
-and the existing Compose configuration does not pass a GPU through to the FEM
-container.
+This release runs tensile baseline and replicate-reduction workflows through the
+asynchronous scientific runner and stores saved workspaces on the desktop. It
+does not yet expose FEM solver jobs in the GUI. Stage provenance v2 records the
+resolved image ID, dependency-lock hash, contract and artifact hashes, source
+revision, runtime, and CPU/thread allocation for formal reduction Runs. The
+DOLFINx base image is pinned by digest. The FEM verification gate remains red
+until pinned DOLFINx and CalculiX stages produce recorded convergence,
+patch-test, analytical-agreement, and cross-solver evidence. FEM-versus-
+experiment comparison is not available before then. The GUI itself does not use
+the GPU, and the existing Compose configuration does not pass a GPU through to
+the FEM container.
+
+The runner uses one local asynchronous worker and a server-controlled stage
+registry. Queued/running jobs are persisted and fail closed if the runner
+restarts rather than being presented as resumed. Formal stage images must record
+a clean 40-character Git commit, a dependency-lock hash, and their resolved image
+identity; builds with unknown or dirty source revisions are rejected.
 
 ## Reproducibility rule
 
@@ -238,7 +256,8 @@ mutually incompatible dependency sets are split across containers.
 `docs/glossary.md` explains the terminology all three use, with a compact
 lookup table at the end.
 
-1. Pin and record immutable DOLFINx and CalculiX images; run all four M4
+1. Add formal Level-1 stage images, then the isotropic Level-2 FEM stage. Pin
+   and record immutable DOLFINx and CalculiX images; run all four isotropic FEM
    verification gates and retain their artifacts.
 2. Finalize the specimen matrix and collect at least five specimens per
    configuration, including 0°, 90°, upright Z, held-out bend, notched, and DCB

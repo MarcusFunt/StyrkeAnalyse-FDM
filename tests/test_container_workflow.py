@@ -18,6 +18,20 @@ def test_notebook_requirements_do_not_repin_locked_scientific_packages():
     assert requirements == ["jupyterlab==4.4.10", "ipykernel==6.30.1"]
 
 
+def test_experimental_reduction_image_pins_python_and_uv_bases():
+    dockerfile = (ROOT / "docker/exp-reduction.Dockerfile").read_text()
+
+    assert (
+        "python:3.12-slim-bookworm@sha256:"
+        "392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e"
+    ) in dockerfile
+    assert (
+        "ghcr.io/astral-sh/uv:0.12.15@"
+        "sha256:62f8c047d0a0e9ece6b53fc63df902585a67a47a7f318ddec4a37db586edc8e3"
+    ) in dockerfile
+    assert "fdm.base-image.reference=${FDM_BASE_IMAGE}" in dockerfile
+
+
 def test_fenicsx_sync_restores_jupyter_and_devcontainer_runs_only_fenicsx():
     devcontainer = json.loads((ROOT / ".devcontainer/devcontainer.json").read_text())
     post_create = devcontainer["postCreateCommand"]

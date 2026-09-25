@@ -68,6 +68,7 @@ class Configuration(StrictModel):
     id: str = Field(min_length=1, max_length=120)
     label: str = Field(min_length=1, max_length=200)
     material: str | None = Field(default=None, max_length=120)
+    manufacturer: str | None = Field(default=None, max_length=120)
     material_lot: str | None = Field(default=None, max_length=120)
     printer: str | None = Field(default=None, max_length=120)
     print_profile: str | None = Field(default=None, max_length=120)
@@ -368,6 +369,7 @@ class StudyWorkspaceV2(StrictModel):
 
         specimen_field_by_control = {
             "material": "material",
+            "manufacturer": "manufacturer",
             "material_lot": "material_lot",
             "printer": "printer",
             "nozzle": "nozzle",
@@ -500,6 +502,7 @@ def migrate_workspace_v2_to_v3(payload: dict[str, Any]) -> dict[str, Any]:
 
     controls = {
         "material": ("material", "material"),
+        "manufacturer": ("manufacturer", "manufacturer"),
         "material_lot": ("material_lot", "material_lot"),
         "printer": ("printer", "printer"),
         "nozzle": ("nozzle", "nozzle"),

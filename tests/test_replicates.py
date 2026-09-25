@@ -142,7 +142,8 @@ def test_campaign_reduction_uses_specimens_sample_standard_deviation_and_cv():
     assert campaign.mean_mpa == pytest.approx(1000)
     assert campaign.sample_standard_deviation_mpa == pytest.approx(70.71067811865476)
     assert campaign.coefficient_of_variation_percent == pytest.approx(7.071067811865476)
-    assert campaign.ready_for_validation is True
+    assert campaign.replicate_ready is True
+    assert campaign.ready_for_validation is True  # compatibility alias
 
 
 def test_campaign_gate_requires_five_valid_specimens_and_cv_at_most_fifteen_percent():
@@ -154,10 +155,10 @@ def test_campaign_gate_requires_five_valid_specimens_and_cv_at_most_fifteen_perc
         ]
     )
 
-    assert too_few.ready_for_validation is False
+    assert too_few.replicate_ready is False
     assert too_few.reason and "5" in too_few.reason
     assert high_cv.n_valid == 5
-    assert high_cv.ready_for_validation is False
+    assert high_cv.replicate_ready is False
     assert high_cv.coefficient_of_variation_percent > 15
 
 
@@ -175,4 +176,4 @@ def test_campaign_reports_undefined_statistics_without_enough_valid_specimens():
     assert campaign.mean_mpa is None
     assert campaign.sample_standard_deviation_mpa is None
     assert campaign.coefficient_of_variation_percent is None
-    assert campaign.ready_for_validation is False
+    assert campaign.replicate_ready is False

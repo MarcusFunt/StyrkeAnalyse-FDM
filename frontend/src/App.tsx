@@ -94,7 +94,8 @@ interface CampaignReductionResponse {
       coefficient_of_variation_percent: number | null;
       minimum_specimens: number;
       maximum_cv_percent: number;
-      ready_for_validation: boolean;
+      replicate_ready?: boolean;
+      ready_for_validation?: boolean;
       reason: string | null;
     };
   }>;
@@ -131,6 +132,59 @@ function asString(value: unknown, fallback: string): string {
 
 function asUnit<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
   return typeof value === "string" && allowed.includes(value as T) ? (value as T) : fallback;
+}
+
+interface RunnerJobEnvelope {
+  job?: {
+    id?: unknown;
+    status?: unknown;
+    error?: unknown;
+  };
+  run?: {
+    id?: unknown;
+    created_at?: unknown;
+  };
+  result?: Record<string, unknown>;
+  error?: unknown;
+}
+
+async function submitRunAndWait(
+  requestBody: Record<string, unknown>,
+  failureMessage: string,
+): Promise<RunnerJobEnvelope> {
+  const response = await fetch("/api/runs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(requestBody),
+  });
+  const queued = await response.json() as RunnerJobEnvelope;
+  if (!response.ok) {
+    throw new Error(typeof queued.error === "string" ? queued.error : failureMessage);
+  }
+  const jobId = queued.job?.id;
+  if (typeof jobId !== "string") throw new Error("The runner did not return a job ID.");
+
+  // The browser never holds a long-lived solver request open. FEM/RVE stages may
+  // take minutes or hours; polling keeps the control plane responsive.
+  for (let attempt = 0; attempt < 7200; attempt += 1) {
+    const statusResponse = await fetch(`/api/jobs/${jobId}`);
+    const payload = await statusResponse.json() as RunnerJobEnvelope;
+    if (!statusResponse.ok) {
+      throw new Error(typeof payload.error === "string" ? payload.error : failureMessage);
+    }
+    if (payload.job?.status === "succeeded") {
+      if (!payload.run || !payload.result) {
+        throw new Error("The completed runner job omitted its immutable Run result.");
+      }
+      return payload;
+    }
+    if (payload.job?.status === "failed") {
+      const detail = payload.job?.error;
+      throw new Error(typeof detail === "string" ? detail : failureMessage);
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
+  }
+  throw new Error("The runner job did not finish within 30 minutes.");
 }
 
 export default function App() {
@@ -194,10 +248,39 @@ export default function App() {
 
   useEffect(() => {
     if (page !== "results" || apiState !== "ready") return;
+    let active = true;
+
+    if (campaignRunId !== null) {
+      if (campaignReduction !== null) return;
+      setIsReducingCampaign(true);
+      void (async () => {
+        const response = await fetch(`/api/runs/${campaignRunId}`);
+        const payload = await response.json() as RunnerJobEnvelope;
+        if (!response.ok) {
+          throw new Error(typeof payload.error === "string"
+            ? payload.error
+            : "Could not load the saved campaign Run.");
+        }
+        if (!payload.result) throw new Error("The saved campaign Run has no result artifact.");
+        if (!active) return;
+        setCampaignReduction(payload.result as unknown as CampaignReductionResponse);
+      })()
+        .catch((error: unknown) => {
+          if (!active) return;
+          setCampaignReduction(null);
+          setCampaignRunId(null);
+          setMessage(error instanceof Error ? error.message : "Could not load the saved campaign Run.");
+        })
+        .finally(() => {
+          if (active) setIsReducingCampaign(false);
+        });
+      return () => {
+        active = false;
+      };
+    }
+
     const workspace = createWorkspace();
     workspace.campaign.reduction_run_id = null;
-    let active = true;
-    setCampaignRunId(null);
     setIsReducingCampaign(true);
     void (async () => {
       const workspaceBytes = new TextEncoder().encode(JSON.stringify(workspace));
@@ -205,12 +288,20 @@ export default function App() {
         workspaceBytes.buffer.slice(workspaceBytes.byteOffset, workspaceBytes.byteOffset + workspaceBytes.byteLength),
       );
       const upstreamRunIds = workspace.specimens
-        .flatMap((specimen) => specimen.test_runs.map((run) => run.run_id))
+        .flatMap((specimen) =>
+          specimen.test_runs
+            .filter((run) => run.primary_for_reduction)
+            .map((run) => run.run_id),
+        )
         .filter((runId): runId is string => Boolean(runId));
-      const response = await fetch("/api/runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      if (upstreamRunIds.length === 0) {
+        throw new Error(
+          "Campaign reduction needs at least one local immutable specimen Run. " +
+          "Portable workspace exports intentionally detach desktop-local Run IDs.",
+        );
+      }
+      const payload = await submitRunAndWait(
+        {
           operation: "campaign",
           input_file: {
             filename: `${workspace.study_name || "study"}.fdmstudy.json`,
@@ -223,12 +314,12 @@ export default function App() {
           },
           parameters: {},
           upstream_run_ids: upstreamRunIds,
-        }),
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error ?? "Could not reduce the campaign specimens.");
+        },
+        "Could not reduce the campaign specimens.",
+      );
       if (!active) return;
-      setCampaignReduction(payload.result as CampaignReductionResponse);
+      if (!payload.result) throw new Error("The completed campaign job omitted its result.");
+      setCampaignReduction(payload.result as unknown as CampaignReductionResponse);
       const runId = payload.run?.id;
       if (typeof runId === "string") {
         setCampaignRunId(runId);
@@ -249,7 +340,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [page, apiState]);
+  }, [page, apiState, campaignRunId, campaignReduction]);
 
   const setupValid = isAnalysisInputValid(
     columns,
@@ -358,7 +449,7 @@ export default function App() {
     }
     try {
       const bytes = await file.arrayBuffer();
-      const parsed = parseCsvText(new TextDecoder().decode(bytes));
+      const parsed = parseCsvText(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
       const sha256 = await hashBytes(bytes);
       const mediaType = file.type || (file.name.toLowerCase().endsWith(".tsv") ? "text/tab-separated-values" : "text/csv");
       setSourceFileName(file.name);
@@ -440,7 +531,7 @@ export default function App() {
       calibrationSource: testRun?.compliance_correction.calibration_source ?? "",
       print: {
         material: configuration?.material ?? "",
-        manufacturer: specimen.print_metadata.manufacturer ?? "",
+        manufacturer: configuration?.manufacturer ?? specimen.print_metadata.manufacturer ?? "",
         materialLot: configuration?.material_lot ?? "",
         printer: configuration?.printer ?? "",
         nozzle: configuration?.nozzle ?? "",
@@ -531,6 +622,7 @@ export default function App() {
     const specimenPrintMetadata: PrintMetadata = {
       ...printMetadata,
       material: null,
+      manufacturer: null,
       material_lot: null,
       printer: null,
       nozzle: null,
@@ -610,6 +702,7 @@ export default function App() {
       id: specimenMetadata.configurationId,
       label: specimenMetadata.configurationLabel.trim() || "Configuration 1",
       material: printMetadata.material,
+      manufacturer: printMetadata.manufacturer,
       material_lot: printMetadata.material_lot,
       printer: printMetadata.printer,
       print_profile: previousConfiguration?.print_profile ?? null,
@@ -651,9 +744,19 @@ export default function App() {
 
   function saveWorkspace(): void {
     const workspace = createWorkspace();
+    // Formal Run IDs are local references into the desktop artifact store. A
+    // portable workspace must not pretend those IDs are resolvable elsewhere.
+    const portable: StudyWorkspace = {
+      ...workspace,
+      campaign: { ...workspace.campaign, reduction_run_id: null },
+      specimens: workspace.specimens.map((specimen) => ({
+        ...specimen,
+        test_runs: specimen.test_runs.map((run) => ({ ...run, run_id: null })),
+      })),
+    };
     downloadFile(
       `${(studyName.trim() || "fdm-study").toLowerCase().replace(/[^a-z0-9]+/g, "-")}.fdmstudy.json`,
-      JSON.stringify(workspace, null, 2),
+      JSON.stringify(portable, null, 2),
       "application/json",
     );
   }
@@ -860,10 +963,8 @@ export default function App() {
       if (!inputCsvBase64 || !inputFile?.sha256) {
         throw new Error("Re-import the original CSV before running a new analysis. Saved workspaces do not include source-file bytes.");
       }
-      const response = await fetch("/api/runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const payload = await submitRunAndWait(
+        {
           operation: "tensile",
           input_file: {
             filename: inputFile.filename,
@@ -891,10 +992,9 @@ export default function App() {
               calibration_source: optionalText(specimenMetadata.calibrationSource),
             },
           },
-        }),
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error ?? "Analysis failed. Check the mapped columns and units.");
+        },
+        "Analysis failed. Check the mapped columns and units.",
+      );
       if (!isAnalysisSnapshotCurrent(submittedFingerprint, analysisInputFingerprintRef.current)) {
         setMessage("The data or setup changed while analysis was running. The stale result was discarded; run it again.");
         return;
@@ -1706,7 +1806,7 @@ function CampaignReductionPanel(props: { reduction: CampaignReductionResponse | 
               <section className="configuration-reduction" key={configuration.configuration_id}>
                 <div className="configuration-reduction-heading">
                   <div><h3>{configuration.configuration_label}</h3><span>{aggregate.n_valid} valid of {aggregate.n_total} specimens</span></div>
-                  <span className={aggregate.ready_for_validation ? "replicate-count ready" : "replicate-count"}>{aggregate.ready_for_validation ? "Replicate gate met" : "Not ready"}</span>
+                  <span className={(aggregate.replicate_ready ?? aggregate.ready_for_validation ?? false) ? "replicate-count ready" : "replicate-count"}>{(aggregate.replicate_ready ?? aggregate.ready_for_validation ?? false) ? "Replicate gate met" : "Not ready"}</span>
                 </div>
                 <div className="replicate-stat-grid">
                   <MetricCard label="Mean modulus" value={aggregate.mean_mpa === null ? "—" : formatNumber(aggregate.mean_mpa, 2)} unit="MPa" note={`${aggregate.n_valid} valid specimens`} icon={<Activity size={16} />} accent="teal" />

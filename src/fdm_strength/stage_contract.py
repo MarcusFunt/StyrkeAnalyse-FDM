@@ -36,7 +36,7 @@ class StageContract(BaseModel):
     schema_version: Literal[1, 2]
     run_id: str
     stage_id: str
-    operation: str = Field(min_length=1, max_length=100)
+    operation: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
     image_reference: str | None = Field(default=None, max_length=512)
     image_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     base_image_reference: str | None = Field(default=None, max_length=512)
@@ -50,9 +50,13 @@ class StageContract(BaseModel):
     material_profile_id: str | None = Field(default=None, min_length=1, max_length=128)
     material_profile_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     boundary_condition_set_id: str | None = Field(default=None, min_length=1, max_length=128)
+    boundary_condition_set_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     entrypoint: tuple[str, ...] = ("python", "-m", "fdm_strength.exp_reduction_stage")
     mpi_ranks: int = Field(default=1, ge=1, le=1024)
     omp_threads: int = Field(default=1, ge=1, le=1024)
+    openblas_threads: int = Field(default=1, ge=1, le=1024)
     cpu_count: int = Field(default=1, ge=1, le=1024)
     memory_limit_bytes: int = Field(default=1024 * 1024 * 1024, ge=1)
     inputs: tuple[StageInput, ...]
@@ -121,6 +125,7 @@ class StageContract(BaseModel):
                 or self.dependency_lock_sha256 is None
                 or self.git_commit is None
                 or self.mpi_ranks * self.omp_threads > self.cpu_count
+                or self.openblas_threads > self.cpu_count
             ):
                 raise ValueError("version 2 stage contract is missing execution provenance")
         if (self.solver_name is None) != (self.solver_version is None):
@@ -129,6 +134,10 @@ class StageContract(BaseModel):
             raise ValueError("mesh hash and mesh parameters must be supplied together")
         if (self.material_profile_id is None) != (self.material_profile_sha256 is None):
             raise ValueError("material profile ID and hash must be supplied together")
+        if (self.boundary_condition_set_id is None) != (
+            self.boundary_condition_set_sha256 is None
+        ):
+            raise ValueError("boundary-condition set ID and hash must be supplied together")
         return self
 
 

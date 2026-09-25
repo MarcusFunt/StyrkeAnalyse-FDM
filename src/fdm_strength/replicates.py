@@ -33,8 +33,13 @@ class CampaignModulus:
     coefficient_of_variation_percent: float | None
     minimum_specimens: int
     maximum_cv_percent: float
-    ready_for_validation: bool
+    replicate_ready: bool
     reason: str | None
+
+    @property
+    def ready_for_validation(self) -> bool:
+        """Backward-compatible alias; this gate only establishes replicate readiness."""
+        return self.replicate_ready
 
 
 def _finite_point_value(point: dict[str, Any], key: str) -> float:
@@ -248,6 +253,6 @@ def aggregate_modulus(
         coefficient_of_variation_percent=coefficient_of_variation,
         minimum_specimens=minimum_specimens,
         maximum_cv_percent=maximum_cv_percent,
-        ready_for_validation=ready,
+        replicate_ready=ready,
         reason=" ".join(reasons) or None,
     )

@@ -21,10 +21,10 @@ class ArtifactReference(FrozenModel):
 class StageRecord(FrozenModel):
     provenance_schema_version: Literal[1, 2] = 1
     stage_id: str = Field(min_length=1, max_length=100)
-    operation: str = Field(min_length=1, max_length=100)
+    operation: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
     status: Literal["succeeded", "failed"]
     image_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    image_reference: str | None = Field(default=None, max_length=512)
+    image_reference: str | None = Field(default=None, min_length=1, max_length=512)
     base_image_reference: str | None = Field(default=None, max_length=512)
     dependency_lock_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     command: tuple[str, ...] = Field(min_length=1)
@@ -35,10 +35,11 @@ class StageRecord(FrozenModel):
     duration_ms: int = Field(ge=0)
     git_commit: str = Field(min_length=1, max_length=128)
     git_dirty: bool | None
-    mpi_ranks: int | None = Field(default=None, ge=1, le=1024)
-    omp_threads: int | None = Field(default=None, ge=1, le=1024)
+    mpi_ranks: int = Field(default=1, ge=1, le=1024)
+    omp_threads: int = Field(default=1, ge=1, le=1024)
     cpu_count: int = Field(ge=1)
     memory_limit_bytes: int = Field(ge=1)
+    openblas_threads: int = Field(default=1, ge=1)
 
     @field_validator("started_at", "completed_at")
     @classmethod
@@ -57,14 +58,14 @@ class StageRecord(FrozenModel):
             if (
                 self.image_reference is None
                 or self.dependency_lock_sha256 is None
-                or self.mpi_ranks is None
-                or self.omp_threads is None
             ):
                 raise ValueError("version 2 stage provenance is incomplete")
             if self.mpi_ranks * self.omp_threads > self.cpu_count:
                 raise ValueError(
                     "MPI ranks multiplied by OMP threads cannot exceed allocated CPUs"
                 )
+            if self.openblas_threads > self.cpu_count:
+                raise ValueError("OpenBLAS threads cannot exceed allocated CPUs")
         return self
 
 
@@ -74,7 +75,7 @@ class Run(FrozenModel):
         pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     )
     created_at: datetime
-    operation: Literal["tensile", "campaign"]
+    operation: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
     status: Literal["succeeded", "failed"]
     spec_artifact: ArtifactReference
     input_artifacts: tuple[ArtifactReference, ...]

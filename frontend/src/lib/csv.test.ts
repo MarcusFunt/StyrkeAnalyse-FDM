@@ -13,6 +13,14 @@ describe("parseCsvText", () => {
     expect(parsed.warnings).toEqual([]);
   });
 
+  it.each([
+    ["tab", "force\tdisplacement\n1\t0.1", ["force", "displacement"]],
+    ["pipe", "force|displacement\n1|0.1", ["force", "displacement"]],
+    ["comma", "force,displacement\n1,0.1", ["force", "displacement"]],
+  ])("uses the formal parser delimiter set for %s input", (_label, source, columns) => {
+    expect(parseCsvText(source).columns).toEqual(columns);
+  });
+
   it("rejects a file without a usable header", () => {
     expect(() => parseCsvText("\n\n")).toThrow("header row");
   });

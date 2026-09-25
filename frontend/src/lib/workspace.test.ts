@@ -28,7 +28,7 @@ function validV2(): any {
         label: "S01",
         configuration_id: "cfg-1",
         geometry: { width_mm: 10, thickness_mm: 2, gauge_length_mm: 50 },
-        print_metadata: { material: "PLA" },
+        print_metadata: { material: "PLA", manufacturer: "Example Polymers" },
         test_runs: [
           {
             id: "run-1",
@@ -98,8 +98,10 @@ describe("parseWorkspaceText", () => {
     const workspace = parseWorkspaceText(JSON.stringify(validV2()));
     expect(workspace.version).toBe(3);
     expect(workspace.campaign.configurations[0].material).toBe("PLA");
+    expect(workspace.campaign.configurations[0].manufacturer).toBe("Example Polymers");
     expect(workspace.campaign.configurations[0].printer).toBeNull();
     expect(workspace.specimens[0].print_metadata.material).toBeNull();
+    expect(workspace.specimens[0].print_metadata.manufacturer).toBeNull();
   });
 
   it("rejects v2 specimens with incompatible controlled conditions in one configuration", () => {
