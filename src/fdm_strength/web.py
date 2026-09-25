@@ -29,6 +29,7 @@ DEFAULT_DATA_DIR = Path.cwd() / "outputs" / "gui"
 STUDY_PATH = re.compile(r"^/api/studies/([0-9a-f-]{36})$")
 STUDY_ACTION_PATH = re.compile(r"^/api/studies/([0-9a-f-]{36})/(restore|permanent)$")
 RUN_PATH = re.compile(r"^/api/runs/([0-9a-f-]{36})$")
+JOB_PATH = re.compile(r"^/api/jobs/([0-9a-f-]{36})$")
 RUN_REPLAY_PATH = re.compile(r"^/api/runs/([0-9a-f-]{36})/replay$")
 ARTIFACT_PATH = re.compile(r"^/api/artifacts/([0-9a-f]{64})$")
 DEFAULT_RETENTION_DAYS = 30
@@ -665,6 +666,10 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
                 else:
                     revision = _revision(study)
                     self._send_json(200, study, {"ETag": _etag(revision)})
+            return
+        job_match = JOB_PATH.fullmatch(path)
+        if job_match:
+            self._proxy_runner("GET", path)
             return
         run_match = RUN_PATH.fullmatch(path)
         if run_match:

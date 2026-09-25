@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import io
 import json
@@ -18,6 +19,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from fdm_strength.run_jobs import JobStore, RunJob
 from fdm_strength.run_models import ArtifactReference, Run, StageRecord
 from fdm_strength.run_store import ArtifactStore, RunStore
 from fdm_strength.stage_contract import (
@@ -25,14 +27,11 @@ from fdm_strength.stage_contract import (
     StageInput,
     canonical_contract_bytes,
 )
+from fdm_strength.stage_registry import StageDefinition, stage_for_operation
 from fdm_strength.study_models import StudyWorkspaceV3, migrate_workspace_v2_to_v3
 
-DEFAULT_IMAGE = "styrkeanalyse-fdm:exp-reduction"
 MAX_INPUT_BYTES = 24 * 1024 * 1024
-STAGE_TIMEOUT_SECONDS = 120
-STAGE_CPU_COUNT = 1
-STAGE_MEMORY_LIMIT_BYTES = 1024 * 1024 * 1024
-MAX_STAGE_OUTPUT_BYTES = 64 * 1024 * 1024
+DOCKER_API_TIMEOUT_SECONDS = 30
 
 
 class RunInputFile(BaseModel):
@@ -54,7 +53,7 @@ class RunInputFile(BaseModel):
 class RunSubmission(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    operation: str = Field(pattern=r"^(tensile|campaign)$")
+    operation: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
     input_file: RunInputFile
     parameters: dict[str, Any]
     upstream_run_ids: tuple[str, ...] = ()
@@ -74,6 +73,7 @@ class RunSubmission(BaseModel):
 @dataclass(frozen=True)
 class StageImage:
     digest: str
+    reference: str
     git_commit: str
     git_dirty: bool | None
 
@@ -92,20 +92,33 @@ class StageExecution:
 class DockerStageExecutor:
     """Runs a baked image with no network, source mounts, or writable root."""
 
-    def __init__(self, *, timeout_seconds: int = STAGE_TIMEOUT_SECONDS):
-        self.timeout_seconds = timeout_seconds
+    def __init__(self, *, docker_timeout_seconds: int = DOCKER_API_TIMEOUT_SECONDS):
+        self.docker_timeout_seconds = docker_timeout_seconds
 
     def inspect_image(self, image_reference: str | None = None) -> StageImage:
         import docker
 
-        client = docker.from_env(timeout=self.timeout_seconds)
+        client = docker.from_env(timeout=self.docker_timeout_seconds)
         try:
-            image = client.images.get(image_reference or DEFAULT_IMAGE)
+            if not image_reference:
+                raise ValueError("stage image reference is required")
+            try:
+                image = client.images.get(image_reference)
+            except Exception:
+                if "@sha256:" not in image_reference:
+                    raise
+                image = client.images.pull(image_reference)
             labels = (image.attrs.get("Config") or {}).get("Labels") or {}
             commit = labels.get("fdm.git.commit") or labels.get("org.opencontainers.image.revision")
             dirty = labels.get("fdm.git.dirty")
+            repo_digests = image.attrs.get("RepoDigests") or []
+            immutable_reference = next(
+                (value for value in repo_digests if isinstance(value, str) and "@sha256:" in value),
+                image.id,
+            )
             return StageImage(
                 digest=image.id,
+                reference=immutable_reference,
                 git_commit=commit if isinstance(commit, str) and commit else "unknown",
                 git_dirty=(dirty.lower() == "true")
                 if dirty and dirty.lower() in {"true", "false"}
@@ -119,6 +132,7 @@ class DockerStageExecutor:
         contract_bytes: bytes,
         inputs: dict[str, bytes],
         image_digest: str,
+        definition: StageDefinition,
     ) -> StageExecution:
         import docker
 
@@ -126,11 +140,15 @@ class DockerStageExecutor:
         stdout = b""
         stderr = b""
         container = None
-        client = docker.from_env(timeout=self.timeout_seconds)
+        client = docker.from_env(timeout=self.docker_timeout_seconds)
         try:
             container = client.containers.create(
                 image_digest,
-                command=("python", "-c", "import time; time.sleep(300)"),
+                command=(
+                    "python",
+                    "-c",
+                    f"import time; time.sleep({definition.timeout_seconds + 60})",
+                ),
                 name=f"fdm-stage-{uuid.uuid4().hex}",
                 user="10001:10001",
                 network_mode="none",
@@ -138,10 +156,15 @@ class DockerStageExecutor:
                 security_opt=["no-new-privileges:true"],
                 cap_drop=["ALL"],
                 pids_limit=128,
-                mem_limit=STAGE_MEMORY_LIMIT_BYTES,
-                nano_cpus=STAGE_CPU_COUNT * 1_000_000_000,
+                mem_limit=definition.memory_limit_bytes,
+                nano_cpus=definition.cpu_count * 1_000_000_000,
+                environment={
+                    "OMP_NUM_THREADS": str(definition.omp_threads),
+                    "OPENBLAS_NUM_THREADS": str(definition.openblas_threads),
+                    "FDM_MPI_RANKS": str(definition.mpi_ranks),
+                },
                 tmpfs={
-                    "/work": ("rw,noexec,nosuid,nodev,size=134217728,uid=10001,gid=10001,mode=0770")
+                    "/work": (f"rw,noexec,nosuid,nodev,size={definition.work_size_bytes},uid=10001,gid=10001,mode=0770")
                 },
             )
             container.start()
@@ -149,16 +172,20 @@ class DockerStageExecutor:
             for digest, content in inputs.items():
                 input_name = _contract_input_name(contract_bytes, digest)
                 entries[f"in/{input_name}"] = content
-            _send_archive_to_work(client, container, _make_tar(entries), self.timeout_seconds)
+            _send_archive_to_work(client, container, _make_tar(entries), definition.timeout_seconds)
 
-            stage_stdout, stage_stderr, exit_code = self._exec_with_timeout(container)
+            stage_stdout, stage_stderr, exit_code = self._exec_with_timeout(container, definition)
             stdout = stage_stdout
             stderr = stage_stderr
             outputs: dict[str, bytes] = {}
             if exit_code == 0:
                 contract = StageContract.model_validate_json(contract_bytes)
                 outputs = _read_stage_outputs(
-                    client, container, contract.expected_outputs, self.timeout_seconds
+                    client,
+                    container,
+                    contract.expected_outputs,
+                    definition.timeout_seconds,
+                    definition.max_output_bytes,
                 )
             success = exit_code == 0
             error = (
@@ -193,22 +220,26 @@ class DockerStageExecutor:
                     pass
             client.close()
 
-    def _exec_with_timeout(self, container: Any) -> tuple[bytes, bytes, int]:
-        timer = threading.Timer(self.timeout_seconds, _kill_container, args=(container,))
+    def _exec_with_timeout(
+        self,
+        container: Any,
+        definition: StageDefinition,
+    ) -> tuple[bytes, bytes, int]:
+        timer = threading.Timer(definition.timeout_seconds, _kill_container, args=(container,))
         timer.daemon = True
         timer.start()
         start = time.monotonic()
         try:
             result = container.exec_run(
-                ("python", "-m", "fdm_strength.exp_reduction_stage"),
+                definition.command,
                 workdir="/work",
                 user="10001:10001",
                 demux=True,
             )
         finally:
             timer.cancel()
-        if time.monotonic() - start >= self.timeout_seconds:
-            raise TimeoutError(f"stage exceeded {self.timeout_seconds} seconds")
+        if time.monotonic() - start >= definition.timeout_seconds:
+            raise TimeoutError(f"stage exceeded {definition.timeout_seconds} seconds")
         output = result.output
         if isinstance(output, tuple):
             stdout = output[0] or b""
@@ -222,7 +253,131 @@ class RunService:
     def __init__(self, data_root: str | os.PathLike[str], *, executor: Any | None = None):
         self.artifacts = ArtifactStore(data_root)
         self.runs = RunStore(data_root)
+        self.jobs = JobStore(data_root)
+        self.jobs.fail_interrupted(now=datetime.now(timezone.utc))
         self.executor = executor or DockerStageExecutor()
+        self.job_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fdm-runner")
+
+    def enqueue(self, submission: RunSubmission) -> RunJob:
+        """Queue a formal calculation and return immediately with a persistent job handle."""
+        # Resolve the stage before accepting work so unsupported operations fail synchronously.
+        stage_for_operation(submission.operation)
+        now = datetime.now(timezone.utc)
+        job = RunJob(
+            id=str(uuid.uuid4()),
+            operation=submission.operation,
+            status="queued",
+            created_at=now,
+            updated_at=now,
+        )
+        self.jobs.put(job)
+        self.job_pool.submit(self._execute_submission_job, job.id, submission)
+        return job
+
+    def enqueue_replay(self, run_id: str) -> RunJob:
+        original = self.runs.get(run_id)
+        if original.status != "succeeded":
+            raise ValueError("only successful Runs can be replayed")
+        now = datetime.now(timezone.utc)
+        job = RunJob(
+            id=str(uuid.uuid4()),
+            operation=original.operation,
+            status="queued",
+            created_at=now,
+            updated_at=now,
+            replay_of_run_id=run_id,
+        )
+        self.jobs.put(job)
+        self.job_pool.submit(self._execute_replay_job, job.id, run_id)
+        return job
+
+    def read_job(self, job_id: str) -> RunJob:
+        return self.jobs.get(job_id)
+
+    def read_job_payload(
+        self,
+        job_id: str,
+    ) -> tuple[RunJob, Run | None, dict[str, Any] | None]:
+        job = self.jobs.get(job_id)
+        if job.run_id is None:
+            return job, None, None
+        run, result = self.read_run_payload(job.run_id)
+        return job, run, result
+
+    def read_run_payload(self, run_id: str) -> tuple[Run, dict[str, Any] | None]:
+        run = self.runs.get(run_id)
+        return run, self._read_result_value(run)
+
+    def _read_result_value(self, run: Run) -> dict[str, Any] | None:
+        if run.result_artifact is None:
+            return None
+        try:
+            envelope = json.loads(self.artifacts.get_bytes(run.result_artifact.sha256))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(f"Run {run.id} result artifact is invalid JSON") from error
+        if (
+            not isinstance(envelope, dict)
+            or envelope.get("run_id") != run.id
+            or not isinstance(envelope.get("result"), dict)
+        ):
+            raise ValueError(f"Run {run.id} result artifact has an invalid envelope")
+        return envelope["result"]
+
+    def _execute_submission_job(self, job_id: str, submission: RunSubmission) -> None:
+        self._update_job(job_id, status="running")
+        try:
+            run, _ = self.submit(submission)
+        except Exception as error:
+            self._update_job(job_id, status="failed", error=str(error)[:4000])
+            return
+        if run.status == "succeeded":
+            self._update_job(job_id, status="succeeded", run_id=run.id)
+        else:
+            self._update_job(
+                job_id,
+                status="failed",
+                run_id=run.id,
+                error=run.error or "formal Run failed",
+            )
+
+    def _execute_replay_job(self, job_id: str, run_id: str) -> None:
+        self._update_job(job_id, status="running")
+        try:
+            run, _ = self.replay(run_id)
+        except Exception as error:
+            self._update_job(job_id, status="failed", error=str(error)[:4000])
+            return
+        if run.status == "succeeded":
+            self._update_job(job_id, status="succeeded", run_id=run.id)
+        else:
+            self._update_job(
+                job_id,
+                status="failed",
+                run_id=run.id,
+                error=run.error or "formal replay failed",
+            )
+
+    def _update_job(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        run_id: str | None = None,
+        error: str | None = None,
+    ) -> RunJob:
+        job = self.jobs.get(job_id)
+        updated = job.model_copy(
+            update={
+                "status": status,
+                "updated_at": datetime.now(timezone.utc),
+                "run_id": run_id if run_id is not None else job.run_id,
+                "error": error,
+            }
+        )
+        # Re-validate because model_copy intentionally skips validation.
+        updated = RunJob.model_validate(updated.model_dump(mode="python"))
+        self.jobs.put(updated)
+        return updated
 
     def submit(
         self,
@@ -236,6 +391,7 @@ class RunService:
             raise ValueError("uploaded file SHA-256 does not match its provenance")
         if len(input_bytes) > MAX_INPUT_BYTES:
             raise ValueError(f"input file exceeds {MAX_INPUT_BYTES // (1024 * 1024)} MB")
+        definition = stage_for_operation(submission.operation)
         _validate_input_media_type(submission.operation, submission.input_file.media_type)
         parameters = _json_object(submission.parameters, "parameters")
         upstream_runs = self._resolve_upstream_runs(submission, input_bytes)
@@ -245,31 +401,54 @@ class RunService:
             input_bytes,
             media_type=submission.input_file.media_type,
         )
-        stage_input = StageInput(
-            name="source.csv" if submission.operation == "tensile" else "workspace.json",
-            sha256=source_artifact.sha256,
-            size_bytes=source_artifact.size_bytes,
-            media_type=source_artifact.media_type,
-        )
+        source_name = "source.csv" if submission.operation == "tensile" else "workspace.json"
+        stage_inputs: list[StageInput] = [
+            StageInput(
+                name=source_name,
+                sha256=source_artifact.sha256,
+                size_bytes=source_artifact.size_bytes,
+                media_type=source_artifact.media_type,
+            )
+        ]
+        direct_inputs: list[ArtifactReference] = [source_artifact]
+        input_payloads: dict[str, bytes] = {source_artifact.sha256: input_bytes}
+
+        if submission.operation == "campaign":
+            upstream_manifest_bytes = self._campaign_upstream_manifest(upstream_runs)
+            upstream_manifest_artifact = self.artifacts.put_bytes(
+                upstream_manifest_bytes,
+                media_type="application/vnd.styrkeanalyse.upstream-results+json",
+            )
+            stage_inputs.append(
+                StageInput(
+                    name="upstream-results.json",
+                    sha256=upstream_manifest_artifact.sha256,
+                    size_bytes=upstream_manifest_artifact.size_bytes,
+                    media_type=upstream_manifest_artifact.media_type,
+                )
+            )
+            direct_inputs.append(upstream_manifest_artifact)
+            input_payloads[upstream_manifest_artifact.sha256] = upstream_manifest_bytes
+
         stage_parameters = {**parameters, "_source_filename": submission.input_file.filename}
         contract = StageContract(
             schema_version=1,
             run_id=run_id,
-            stage_id="experimental-reduction",
+            stage_id=definition.stage_id,
             operation=submission.operation,
-            inputs=(stage_input,),
+            inputs=tuple(stage_inputs),
             parameters=stage_parameters,
-            expected_outputs=("result.json", "provenance.json"),
+            expected_outputs=definition.expected_outputs,
         )
         contract_bytes = canonical_contract_bytes(contract)
         spec_artifact = self.artifacts.put_bytes(
             contract_bytes,
             media_type="application/vnd.styrkeanalyse.stage-contract+json",
         )
-        direct_inputs = (source_artifact,)
+        direct_input_tuple = tuple(direct_inputs)
         run_inputs = _unique_artifacts(
             (
-                *direct_inputs,
+                *direct_input_tuple,
                 *(
                     reference
                     for parent in upstream_runs
@@ -279,7 +458,8 @@ class RunService:
         )
         started_before_inspect = datetime.now(timezone.utc)
         try:
-            image = self.executor.inspect_image(image_reference)
+            image = self.executor.inspect_image(image_reference or definition.image_reference)
+            _validate_formal_image(image)
         except Exception as error:
             run = Run(
                 id=run_id,
@@ -299,8 +479,9 @@ class RunService:
 
         execution = self.executor.execute(
             contract_bytes,
-            {source_artifact.sha256: input_bytes},
+            input_payloads,
             image.digest,
+            definition,
         )
         outputs: list[ArtifactReference] = []
         result_artifact: ArtifactReference | None = None
@@ -371,12 +552,13 @@ class RunService:
         if log_artifact is not None:
             outputs.append(log_artifact)
         stage = StageRecord(
-            stage_id="experimental-reduction",
+            stage_id=definition.stage_id,
             operation=submission.operation,
             status="succeeded" if execution.success else "failed",
             image_digest=image.digest,
-            command=("python", "-m", "fdm_strength.exp_reduction_stage"),
-            input_artifacts=(spec_artifact, *direct_inputs),
+            image_reference=image.reference,
+            command=definition.command,
+            input_artifacts=(spec_artifact, *direct_input_tuple),
             output_artifacts=tuple(
                 artifact
                 for artifact in (result_artifact, provenance_artifact)
@@ -389,8 +571,11 @@ class RunService:
             ),
             git_commit=image.git_commit,
             git_dirty=image.git_dirty,
-            cpu_count=STAGE_CPU_COUNT,
-            memory_limit_bytes=STAGE_MEMORY_LIMIT_BYTES,
+            cpu_count=definition.cpu_count,
+            memory_limit_bytes=definition.memory_limit_bytes,
+            mpi_ranks=definition.mpi_ranks,
+            omp_threads=definition.omp_threads,
+            openblas_threads=definition.openblas_threads,
         )
         run = Run(
             id=run_id,
@@ -418,9 +603,12 @@ class RunService:
             )
         except (FileNotFoundError, ValidationError, ValueError) as error:
             raise ValueError(f"saved Run {run_id} has an unreadable stage contract") from error
-        if contract.run_id != original.id or len(contract.inputs) != 1:
+        if contract.run_id != original.id:
             raise ValueError("saved Run stage contract does not match its immutable record")
-        input_info = contract.inputs[0]
+        source_name = "source.csv" if contract.operation == "tensile" else "workspace.json"
+        input_info = next((item for item in contract.inputs if item.name == source_name), None)
+        if input_info is None:
+            raise ValueError("saved Run stage contract has no replayable source input")
         source_bytes = self.artifacts.get_bytes(input_info.sha256)
         parameters = dict(contract.parameters)
         filename = parameters.pop("_source_filename", "input.csv")
@@ -437,7 +625,8 @@ class RunService:
         )
         return self.submit(
             replay_submission,
-            image_reference=original.stages[0].image_digest,
+            image_reference=original.stages[0].image_reference
+            or original.stages[0].image_digest,
         )
 
     def read_run(self, run_id: str) -> Run:
@@ -445,6 +634,44 @@ class RunService:
 
     def read_artifact(self, digest: str) -> bytes:
         return self.artifacts.get_bytes(digest)
+
+    def _campaign_upstream_manifest(self, parents: tuple[Run, ...]) -> bytes:
+        runs: dict[str, dict[str, Any]] = {}
+        for parent in parents:
+            if parent.result_artifact is None:
+                raise ValueError(f"upstream Run {parent.id} has no immutable result artifact")
+            try:
+                payload = json.loads(self.artifacts.get_bytes(parent.result_artifact.sha256))
+            except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValueError(
+                    f"upstream Run {parent.id} result artifact could not be read"
+                ) from error
+            if (
+                not isinstance(payload, dict)
+                or payload.get("schema_version") != 1
+                or payload.get("run_id") != parent.id
+                or not isinstance(payload.get("result"), dict)
+            ):
+                raise ValueError(f"upstream Run {parent.id} result envelope is invalid")
+            specimen_reduction = payload["result"].get("specimen_reduction")
+            if not isinstance(specimen_reduction, dict):
+                raise ValueError(
+                    f"upstream Run {parent.id} result omitted specimen_reduction"
+                )
+            runs[parent.id] = {
+                "result_artifact_sha256": parent.result_artifact.sha256,
+                "specimen_reduction": specimen_reduction,
+            }
+        return (
+            json.dumps(
+                {"schema_version": 1, "runs": runs},
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+            + b"\n"
+        )
 
     def _resolve_upstream_runs(
         self,
@@ -479,7 +706,7 @@ class RunService:
                 for test_run in test_runs:
                     if not isinstance(test_run, dict):
                         raise ValueError("specimen test run must be an object")
-                    if test_run.get("run_id"):
+                    if test_run.get("primary_for_reduction") and test_run.get("run_id"):
                         if not isinstance(test_run["run_id"], str):
                             raise ValueError("linked specimen Run IDs must be strings")
                         linked_run_ids.add(test_run["run_id"])
@@ -512,7 +739,7 @@ class RunService:
             for test_run in specimen.get("test_runs", []):
                 if not isinstance(test_run, dict):
                     raise ValueError("specimen test run must be an object")
-                if not test_run.get("run_id"):
+                if not test_run.get("primary_for_reduction") or not test_run.get("run_id"):
                     continue
                 input_file = test_run.get("input_file")
                 if not isinstance(input_file, dict):
@@ -576,6 +803,19 @@ class RunService:
                         raise ValueError(
                             f"compliance metadata does not match linked Run {parent.id}"
                         )
+
+
+def _validate_formal_image(image: StageImage) -> None:
+    if (
+        not isinstance(image.git_commit, str)
+        or len(image.git_commit) != 40
+        or any(character not in "0123456789abcdefABCDEF" for character in image.git_commit)
+    ):
+        raise ValueError("formal stage image must record a 40-character Git commit")
+    if image.git_dirty is not False:
+        raise ValueError("formal stage image must be built from a clean Git checkout")
+    if not image.digest.startswith("sha256:") or len(image.digest) != 71:
+        raise ValueError("formal stage image must have an immutable local sha256 image ID")
 
 
 def _decode_input(source: RunInputFile) -> bytes:
@@ -738,6 +978,7 @@ def _read_stage_outputs(
     container: Any,
     output_names: tuple[str, ...],
     timeout_seconds: int,
+    max_output_bytes: int,
 ) -> dict[str, bytes]:
     names_literal = repr(output_names)
     export_command = (
@@ -769,8 +1010,10 @@ def _read_stage_outputs(
         for output, error in stream:
             if output:
                 stdout.extend(output)
-                if len(stdout) > MAX_STAGE_OUTPUT_BYTES:
-                    raise ValueError("stage outputs exceed 64 MB")
+                if len(stdout) > max_output_bytes:
+                    raise ValueError(
+                        f"stage outputs exceed configured limit of {max_output_bytes} bytes"
+                    )
             if error:
                 stderr.extend(error)
                 if len(stderr) > 16_000:

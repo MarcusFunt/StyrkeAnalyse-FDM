@@ -87,6 +87,7 @@ export interface StudyConfiguration {
   id: string;
   label: string;
   material: string | null;
+  manufacturer: string | null;
   material_lot: string | null;
   printer: string | null;
   print_profile: string | null;
@@ -135,7 +136,7 @@ const topLevelKeys = ["format", "version", "id", "revision", "saved_at", "study_
 const legacyTopLevelKeys = ["format", "version", "id", "revision", "saved_at", "analysis_time", "study_name", "source_file_name", "columns", "rows", "settings", "result"];
 const campaignKeys = ["id", "name", "reduction_run_id", "notes", "created_at", "configurations"];
 const configurationKeys = [
-  "id", "label", "material", "material_lot", "printer", "print_profile", "nozzle",
+  "id", "label", "material", "manufacturer", "material_lot", "printer", "print_profile", "nozzle",
   "nozzle_diameter_mm", "layer_height_mm", "orientation", "build_orientation", "raster_strategy",
   "infill_percent", "nozzle_temperature_c", "bed_temperature_c", "nominal_geometry", "test_type",
   "test_standard_revision",
@@ -356,7 +357,7 @@ function parseV2(value: Record<string, unknown>): StudyWorkspace {
       throw new Error("The workspace contains an invalid campaign configuration.");
     }
     const optionalText = [
-      configuration.material, configuration.material_lot, configuration.printer,
+      configuration.material, configuration.manufacturer, configuration.material_lot, configuration.printer,
       configuration.print_profile, configuration.nozzle, configuration.orientation,
       configuration.build_orientation, configuration.raster_strategy, configuration.test_type,
       configuration.test_standard_revision,
@@ -385,6 +386,7 @@ function parseV2(value: Record<string, unknown>): StudyWorkspace {
       id: configuration.id,
       label: configuration.label,
       material: typeof configuration.material === "string" ? configuration.material : null,
+      manufacturer: typeof configuration.manufacturer === "string" ? configuration.manufacturer : null,
       material_lot: typeof configuration.material_lot === "string" ? configuration.material_lot : null,
       printer: typeof configuration.printer === "string" ? configuration.printer : null,
       print_profile: typeof configuration.print_profile === "string" ? configuration.print_profile : null,
@@ -517,6 +519,7 @@ function parseV2(value: Record<string, unknown>): StudyWorkspace {
   });
   const controlledPrintFields: Array<[keyof StudyConfiguration, keyof PrintMetadata]> = [
     ["material", "material"],
+    ["manufacturer", "manufacturer"],
     ["material_lot", "material_lot"],
     ["printer", "printer"],
     ["nozzle", "nozzle"],
@@ -667,6 +670,7 @@ function migrateV1(workspace: Record<string, unknown>): StudyWorkspace {
         id: "legacy-configuration",
         label: "Legacy configuration",
         material: null,
+        manufacturer: null,
         material_lot: null,
         printer: null,
         print_profile: null,

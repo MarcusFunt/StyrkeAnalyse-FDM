@@ -29,7 +29,9 @@ ARG GIT_COMMIT=unknown
 ARG GIT_DIRTY=unknown
 RUN python -m pip install --no-cache-dir "pydantic==${PYDANTIC_VERSION}"
 
-COPY src/fdm_strength/ /app/src/fdm_strength/
+COPY src/fdm_strength/__init__.py /app/src/fdm_strength/__init__.py
+COPY src/fdm_strength/web.py /app/src/fdm_strength/web.py
+COPY src/fdm_strength/study_models.py /app/src/fdm_strength/study_models.py
 COPY --from=frontend-build /build/dist/ /app/frontend/dist/
 
 LABEL org.opencontainers.image.revision=${GIT_COMMIT} \

@@ -20,9 +20,10 @@ class ArtifactReference(FrozenModel):
 
 class StageRecord(FrozenModel):
     stage_id: str = Field(min_length=1, max_length=100)
-    operation: str = Field(min_length=1, max_length=100)
+    operation: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
     status: Literal["succeeded", "failed"]
     image_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    image_reference: str | None = Field(default=None, min_length=1, max_length=500)
     command: tuple[str, ...] = Field(min_length=1)
     input_artifacts: tuple[ArtifactReference, ...]
     output_artifacts: tuple[ArtifactReference, ...]
@@ -33,6 +34,9 @@ class StageRecord(FrozenModel):
     git_dirty: bool | None
     cpu_count: int = Field(ge=1)
     memory_limit_bytes: int = Field(ge=1)
+    mpi_ranks: int = Field(default=1, ge=1)
+    omp_threads: int = Field(default=1, ge=1)
+    openblas_threads: int = Field(default=1, ge=1)
 
     @field_validator("started_at", "completed_at")
     @classmethod
@@ -56,7 +60,7 @@ class Run(FrozenModel):
         pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     )
     created_at: datetime
-    operation: Literal["tensile", "campaign"]
+    operation: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
     status: Literal["succeeded", "failed"]
     spec_artifact: ArtifactReference
     input_artifacts: tuple[ArtifactReference, ...]

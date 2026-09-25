@@ -21,11 +21,13 @@ RUN groupadd --system --gid 10001 runner \
 
 COPY src/fdm_strength/__init__.py /app/src/fdm_strength/__init__.py
 COPY src/fdm_strength/run_models.py /app/src/fdm_strength/run_models.py
+COPY src/fdm_strength/run_jobs.py /app/src/fdm_strength/run_jobs.py
 COPY src/fdm_strength/run_store.py /app/src/fdm_strength/run_store.py
 COPY src/fdm_strength/runner.py /app/src/fdm_strength/runner.py
 COPY src/fdm_strength/runner_service.py /app/src/fdm_strength/runner_service.py
 COPY src/fdm_strength/study_models.py /app/src/fdm_strength/study_models.py
 COPY src/fdm_strength/stage_contract.py /app/src/fdm_strength/stage_contract.py
+COPY src/fdm_strength/stage_registry.py /app/src/fdm_strength/stage_registry.py
 
 LABEL org.opencontainers.image.revision=${GIT_COMMIT} \
       fdm.git.commit=${GIT_COMMIT} \

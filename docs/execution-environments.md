@@ -1,4 +1,4 @@
-# Execution environments: one container per dependency universe
+# Execution environments: scientific stages over dependency universes
 
 The tool survey in `reference-implementations.md` settles this question: the
 projects worth building on cannot share a Python environment. Isolating them in
@@ -10,19 +10,28 @@ worth the trouble.
 
 ## Current implementation status
 
-Compose currently provides exactly three source-mounted local development
-environments:
+Compose currently separates interactive development from formal scientific
+execution:
 
-| Service | Status and contents |
+| Service / image | Status and contents |
 | --- | --- |
-| `analysis` | Implemented: Python 3.12, scientific Python, JupyterLab, and ordinary package tests. |
-| `fenicsx` | Implemented: the existing DOLFINx/PETSc/MPI, Gmsh, and CalculiX stack plus JupyterLab. |
-| `rve` | Implemented: Python 3.10 and JupyterLab only; VOLCO, fedoo, and fibergen are not installed. |
+| `analysis` | Implemented development environment: Python 3.12, scientific Python, JupyterLab, and ordinary package tests. |
+| `fenicsx` | Implemented development environment: DOLFINx/PETSc/MPI, Gmsh, CalculiX, and JupyterLab. |
+| `rve` | Implemented development environment: Python 3.10 and JupyterLab only; VOLCO, fedoo, and fibergen are not installed. |
+| `gui` | Implemented control plane: React/ECharts UI, editable studies, local study storage, and proxying of job/Run/artifact APIs. It does not execute mechanics. |
+| `runner` | Implemented execution control plane: persistent asynchronous jobs, immutable Runs, content-addressed artifacts, provenance checks, and a server-owned allowlist of stage images/commands/resources. |
+| `exp-reduction` | Implemented one-shot formal stage for tensile specimen reduction and campaign aggregation. Campaign aggregates immutable upstream tensile-Run results rather than editable row copies. |
 
-These services are for interactive development. Their source mounts do not
-meet the formal simulation reproducibility rule below. The separate image
-families for voxel processing, homogenisation, DIC, and legacy FEniCS remain
-deferred until their dependencies and use cases are evaluated.
+The three Jupyter services are interactive development environments. Their
+source mounts do not meet the formal simulation reproducibility rule below.
+Formal work is submitted to the runner, which creates a network-disabled,
+read-only stage container with code baked into the image. The runner returns a
+job ID immediately; clients poll the persistent job record until it points to a
+completed immutable Run.
+
+The separate image families for Level 1/2/3 models, voxel processing,
+homogenisation, DIC, and legacy FEniCS remain deferred until their actual stage
+implementations are added.
 
 ---
 
@@ -54,10 +63,16 @@ forced.
 
 ---
 
-## 2. Split by dependency universe, not by experiment
+## 2. Split formal stages by scientific role and dependency universe
 
-One image per experiment would mean rebuilding for every parameter sweep. What
-actually varies is the *dependency set*, and there are six of those:
+A container per specimen or parameter value would be wasteful; those are Runs,
+not environments. But one giant image per broad dependency family is also too
+coarse for formal work because it hides which scientific stage actually produced
+an artifact. Formal runtime images therefore follow a stable scientific stage
+boundary **and** isolate dependency universes when they conflict. Interactive
+Jupyter environments may remain broader because they are development tools.
+
+The older coarse development families are:
 
 | Family | Status | Contains / purpose |
 | --- | --- | --- |
@@ -101,13 +116,21 @@ orchestrator saves you.
 /work/run.json             the run specification for this stage
 ```
 
-and is invoked as a single CLI command with no interactive state:
+and is invoked as a single CLI command with no interactive state. The runner
+owns the command and image through an allowlisted `StageDefinition`; a browser
+request cannot supply arbitrary Docker images or shell commands. For the current
+stage the runner materialises `run.json` and verified content-addressed inputs
+inside the isolated container, validates the declared outputs, then copies those
+outputs into the artifact store.
+
+Conceptually the same contract can still be exercised by hand during stage
+development:
 
 ```bash
 docker run --rm \
   -v "$RUN/in:/work/in:ro" -v "$RUN/out:/work/out" \
-  fdm-voxel:<digest> \
-  fdm-voxel gcode-to-rve --spec /work/run.json
+  <stage-image>@sha256:<digest> \
+  <stage-command>
 ```
 
 **Formats, fixed now:**
@@ -175,10 +198,12 @@ Three details that are easy to miss and expensive later:
 
    ```yaml
    services:
-     analysis: # bind-mounts source, for editing
-     fenicsx:  # bind-mounts source, for editing
-     rve:      # bind-mounts source, for editing
-     run:      # no source mount, code baked in, for results
+     analysis:      # bind-mounts source, for editing
+     fenicsx:       # bind-mounts source, for editing
+     rve:           # bind-mounts source, for editing
+     gui:           # control plane, no mechanics execution
+     runner:        # launches data-only formal stage containers
+     exp-reduction: # baked one-shot stage image
    ```
 
    This is the mechanism that actually enforces the README's reproducibility
@@ -252,17 +277,36 @@ cost against the part being graded.
 
 ## 7. Remaining repository work
 
+The file-based contract, immutable Run/artifact store, baked experimental stage,
+allowlisted stage registry, and asynchronous local job queue now exist. The
+remaining work should build on that boundary rather than adding mechanics to the
+GUI or runner.
+
 In rough order:
 
-1. Define the stage CLI contract (`--spec /work/run.json`, `/work/in`,
-   `/work/out`) and add `schema_version` to the pydantic models in M0.
-2. Pin `DOLFINX_IMAGE` to a digest — already required by roadmap §1.3.
-3. Extend `provenance.py` to the per-stage record in §4, including `mpi_ranks`
-   and `omp_threads`.
-4. Evaluate and pin dependencies before building any deferred image family.
-5. Add a `Makefile` with one target per stage, so the orchestrator is a
-   one-line change later.
-6. Revisit Kubernetes when either a cluster or a real sweep exists.
+1. Add formal Level-1 analytical/CLT stage images to prove that multiple stage
+   definitions can use the same runner contract.
+2. Implement the Level-2 isotropic CalculiX/Gmsh stage and generate the four
+   isotropic-FEM verification artifacts before enabling experiment comparison.
+3. Stage records already persist MPI ranks and OMP/OpenBLAS thread counts and
+   the runner enforces those values in the container environment. Add
+   solver-specific mesh, boundary-condition, material, and model digests as FEM
+   stages are introduced.
+4. Replace the current in-memory output-tar collection with streamed/disk-backed
+   artifact ingestion before stages begin producing large meshes, fields, voxel
+   arrays, or DIC data. Per-stage output/work limits are already controlled by
+   the stage registry, but high-volume stages should not buffer their full output
+   archives in runner memory.
+5. Publish formal images to a registry and prefer pullable
+   `repository@sha256:<manifest>` references. Local builds record the exact
+   Docker image ID; a registry digest is required for replay after local image
+   pruning or on another machine.
+6. Generate frontend domain types/runtime validation from the authoritative
+   versioned Pydantic/JSON schemas instead of maintaining the growing workspace
+   schema twice.
+7. Revisit Kubernetes only when either a real cluster or a sweep large enough to
+   justify distributed scheduling exists.
 
-The three local development images are implemented. Formal result runs still
-need the baked-image and data-only mount workflow described above.
+The current job queue intentionally has one worker. Queued/running jobs are
+persisted, but after a runner restart they fail closed rather than being
+silently resumed; this keeps provenance unambiguous on a single workstation.

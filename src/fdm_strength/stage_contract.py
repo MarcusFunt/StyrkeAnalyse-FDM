@@ -36,7 +36,7 @@ class StageContract(BaseModel):
     schema_version: Literal[1]
     run_id: str
     stage_id: str
-    operation: Literal["tensile", "campaign"]
+    operation: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
     inputs: tuple[StageInput, ...]
     parameters: dict[str, Any]
     expected_outputs: tuple[str, ...] = Field(min_length=1)
