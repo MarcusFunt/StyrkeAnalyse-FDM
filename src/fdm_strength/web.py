@@ -464,20 +464,28 @@ class GuiRequestHandler(BaseHTTPRequestHandler):
             with urlopen(
                 request, timeout=float(os.environ.get("FDM_RUNNER_TIMEOUT", "180"))
             ) as response:
-                self._send_bytes(
-                    response.status,
-                    response.read(),
-                    response.headers.get("Content-Type", "application/octet-stream"),
+                runner_status = response.status
+                runner_body = response.read()
+                runner_content_type = response.headers.get(
+                    "Content-Type", "application/octet-stream"
                 )
         except HTTPError as error:
-            self._send_bytes(
-                error.code,
-                error.read(),
-                error.headers.get("Content-Type", "application/json; charset=utf-8"),
+            runner_status = error.code
+            runner_body = error.read()
+            runner_content_type = error.headers.get(
+                "Content-Type", "application/json; charset=utf-8"
             )
         except (URLError, TimeoutError, OSError) as error:
             LOGGER.warning("Runner request failed: %s", error)
-            self._send_json(503, {"error": "The scientific runner is unavailable"})
+            try:
+                self._send_json(503, {"error": "The scientific runner is unavailable"})
+            except OSError as send_error:
+                LOGGER.debug("Client disconnected while reporting runner failure: %s", send_error)
+            return
+        try:
+            self._send_bytes(runner_status, runner_body, runner_content_type)
+        except OSError as error:
+            LOGGER.debug("Client disconnected before the runner response was delivered: %s", error)
 
     def _study_file(self, study_id: str) -> Path:
         return self.data_root / "studies" / f"{study_id}.json"

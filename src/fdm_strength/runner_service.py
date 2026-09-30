@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import socket
 import tarfile
 import threading
@@ -18,6 +19,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from fdm_strength.provenance import StageProvenance
 from fdm_strength.run_models import ArtifactReference, Run, StageRecord
 from fdm_strength.run_store import ArtifactStore, RunStore
 from fdm_strength.stage_contract import (
@@ -76,6 +78,9 @@ class StageImage:
     digest: str
     git_commit: str
     git_dirty: bool | None
+    image_reference: str | None = None
+    base_image_reference: str | None = None
+    dependency_lock_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -98,18 +103,35 @@ class DockerStageExecutor:
     def inspect_image(self, image_reference: str | None = None) -> StageImage:
         import docker
 
+        resolved_reference = image_reference or DEFAULT_IMAGE
         client = docker.from_env(timeout=self.timeout_seconds)
         try:
-            image = client.images.get(image_reference or DEFAULT_IMAGE)
+            image = client.images.get(resolved_reference)
             labels = (image.attrs.get("Config") or {}).get("Labels") or {}
             commit = labels.get("fdm.git.commit") or labels.get("org.opencontainers.image.revision")
             dirty = labels.get("fdm.git.dirty")
+            lock_digest = labels.get("fdm.dependency-lock.sha256")
+            if not isinstance(lock_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", lock_digest):
+                raise ValueError(
+                    "stage image has no valid dependency-lock label; rebuild the pinned stage image"
+                )
+            if (
+                not isinstance(commit, str)
+                or not commit.strip()
+                or commit.lower() == "unknown"
+            ):
+                raise ValueError(
+                    "stage image has no source revision label; rebuild it with GIT_COMMIT"
+                )
+            if not isinstance(dirty, str) or dirty.lower() not in {"true", "false"}:
+                raise ValueError("stage image has no git-dirty label; rebuild it with GIT_DIRTY")
             return StageImage(
                 digest=image.id,
-                git_commit=commit if isinstance(commit, str) and commit else "unknown",
-                git_dirty=(dirty.lower() == "true")
-                if dirty and dirty.lower() in {"true", "false"}
-                else None,
+                git_commit=commit,
+                git_dirty=dirty.lower() == "true",
+                image_reference=resolved_reference,
+                base_image_reference=labels.get("fdm.base-image.reference") or None,
+                dependency_lock_sha256=lock_digest,
             )
         finally:
             client.close()
@@ -122,6 +144,9 @@ class DockerStageExecutor:
     ) -> StageExecution:
         import docker
 
+        contract = StageContract.model_validate_json(contract_bytes)
+        if contract.image_digest is not None and contract.image_digest != image_digest:
+            raise ValueError("stage contract image digest does not match the resolved image")
         started_at = datetime.now(timezone.utc)
         stdout = b""
         stderr = b""
@@ -138,8 +163,15 @@ class DockerStageExecutor:
                 security_opt=["no-new-privileges:true"],
                 cap_drop=["ALL"],
                 pids_limit=128,
-                mem_limit=STAGE_MEMORY_LIMIT_BYTES,
-                nano_cpus=STAGE_CPU_COUNT * 1_000_000_000,
+                mem_limit=contract.memory_limit_bytes,
+                nano_cpus=contract.cpu_count * 1_000_000_000,
+                environment={
+                    "MPI_RANKS": str(contract.mpi_ranks),
+                    "OMP_NUM_THREADS": str(contract.omp_threads),
+                    "OPENBLAS_NUM_THREADS": str(contract.omp_threads),
+                    "MKL_NUM_THREADS": str(contract.omp_threads),
+                    "NUMEXPR_NUM_THREADS": str(contract.omp_threads),
+                },
                 tmpfs={
                     "/work": ("rw,noexec,nosuid,nodev,size=134217728,uid=10001,gid=10001,mode=0770")
                 },
@@ -151,7 +183,9 @@ class DockerStageExecutor:
                 entries[f"in/{input_name}"] = content
             _send_archive_to_work(client, container, _make_tar(entries), self.timeout_seconds)
 
-            stage_stdout, stage_stderr, exit_code = self._exec_with_timeout(container)
+            stage_stdout, stage_stderr, exit_code = self._exec_with_timeout(
+                container, contract.entrypoint
+            )
             stdout = stage_stdout
             stderr = stage_stderr
             outputs: dict[str, bytes] = {}
@@ -193,14 +227,18 @@ class DockerStageExecutor:
                     pass
             client.close()
 
-    def _exec_with_timeout(self, container: Any) -> tuple[bytes, bytes, int]:
+    def _exec_with_timeout(
+        self,
+        container: Any,
+        entrypoint: tuple[str, ...] = ("python", "-m", "fdm_strength.exp_reduction_stage"),
+    ) -> tuple[bytes, bytes, int]:
         timer = threading.Timer(self.timeout_seconds, _kill_container, args=(container,))
         timer.daemon = True
         timer.start()
         start = time.monotonic()
         try:
             result = container.exec_run(
-                ("python", "-m", "fdm_strength.exp_reduction_stage"),
+                entrypoint,
                 workdir="/work",
                 user="10001:10001",
                 demux=True,
@@ -251,21 +289,6 @@ class RunService:
             size_bytes=source_artifact.size_bytes,
             media_type=source_artifact.media_type,
         )
-        stage_parameters = {**parameters, "_source_filename": submission.input_file.filename}
-        contract = StageContract(
-            schema_version=1,
-            run_id=run_id,
-            stage_id="experimental-reduction",
-            operation=submission.operation,
-            inputs=(stage_input,),
-            parameters=stage_parameters,
-            expected_outputs=("result.json", "provenance.json"),
-        )
-        contract_bytes = canonical_contract_bytes(contract)
-        spec_artifact = self.artifacts.put_bytes(
-            contract_bytes,
-            media_type="application/vnd.styrkeanalyse.stage-contract+json",
-        )
         direct_inputs = (source_artifact,)
         run_inputs = _unique_artifacts(
             (
@@ -281,6 +304,19 @@ class RunService:
         try:
             image = self.executor.inspect_image(image_reference)
         except Exception as error:
+            failed_contract = StageContract(
+                schema_version=1,
+                run_id=run_id,
+                stage_id="experimental-reduction",
+                operation=submission.operation,
+                inputs=(stage_input,),
+                parameters={**parameters, "_source_filename": submission.input_file.filename},
+                expected_outputs=("result.json", "provenance.json"),
+            )
+            spec_artifact = self.artifacts.put_bytes(
+                canonical_contract_bytes(failed_contract),
+                media_type="application/vnd.styrkeanalyse.stage-contract+json",
+            )
             run = Run(
                 id=run_id,
                 created_at=started_before_inspect,
@@ -297,6 +333,33 @@ class RunService:
             self.runs.create(run)
             return run, None
 
+        provenance_schema_version = 2 if image.dependency_lock_sha256 else 1
+        contract = StageContract(
+            schema_version=provenance_schema_version,
+            run_id=run_id,
+            stage_id="experimental-reduction",
+            operation=submission.operation,
+            image_reference=image.image_reference,
+            image_digest=image.digest if provenance_schema_version == 2 else None,
+            base_image_reference=image.base_image_reference,
+            dependency_lock_sha256=image.dependency_lock_sha256,
+            git_commit=image.git_commit,
+            git_dirty=image.git_dirty,
+            entrypoint=("python", "-m", "fdm_strength.exp_reduction_stage"),
+            mpi_ranks=1,
+            omp_threads=1,
+            cpu_count=STAGE_CPU_COUNT,
+            memory_limit_bytes=STAGE_MEMORY_LIMIT_BYTES,
+            inputs=(stage_input,),
+            parameters={**parameters, "_source_filename": submission.input_file.filename},
+            expected_outputs=("result.json", "provenance.json"),
+        )
+        contract_bytes = canonical_contract_bytes(contract)
+        spec_artifact = self.artifacts.put_bytes(
+            contract_bytes,
+            media_type="application/vnd.styrkeanalyse.stage-contract+json",
+        )
+
         execution = self.executor.execute(
             contract_bytes,
             {source_artifact.sha256: input_bytes},
@@ -306,6 +369,7 @@ class RunService:
         result_artifact: ArtifactReference | None = None
         provenance_artifact: ArtifactReference | None = None
         result_value: dict[str, Any] | None = None
+        stage_provenance: StageProvenance | None = None
         if execution.success:
             output_bytes = execution.outputs.get("result.json")
             if output_bytes is None:
@@ -323,33 +387,102 @@ class RunService:
                     provenance_bytes = execution.outputs.get("provenance.json")
                     if provenance_bytes is None:
                         raise ValueError("stage omitted provenance.json")
-                    provenance = json.loads(provenance_bytes)
-                    expected_provenance = {
-                        "schema_version": 1,
-                        "run_id": run_id,
-                        "stage_id": contract.stage_id,
-                        "operation": contract.operation,
-                        "inputs": [
-                            {
-                                "name": item.name,
-                                "sha256": item.sha256,
-                                "size_bytes": item.size_bytes,
-                            }
-                            for item in contract.inputs
-                        ],
-                        "outputs": [
-                            {
-                                "name": "result.json",
-                                "sha256": hashlib.sha256(output_bytes).hexdigest(),
-                                "size_bytes": len(output_bytes),
-                            }
-                        ],
+                    expected_inputs = [
+                        {
+                            "name": item.name,
+                            "sha256": item.sha256,
+                            "size_bytes": item.size_bytes,
+                            "media_type": item.media_type,
+                        }
+                        for item in contract.inputs
+                    ]
+                    expected_output = {
+                        "name": "result.json",
+                        "sha256": hashlib.sha256(output_bytes).hexdigest(),
+                        "size_bytes": len(output_bytes),
+                        "media_type": "application/vnd.styrkeanalyse.experimental-reduction+json",
                     }
-                    if provenance != expected_provenance:
-                        raise ValueError(
-                            "stage provenance does not match its immutable inputs and outputs"
-                        )
-                except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+                    if contract.schema_version == 2:
+                        stage_provenance = StageProvenance.model_validate_json(provenance_bytes)
+                        if (
+                            stage_provenance.run_id != run_id
+                            or stage_provenance.stage_id != contract.stage_id
+                            or stage_provenance.operation != contract.operation
+                            or stage_provenance.image_reference != contract.image_reference
+                            or stage_provenance.image_digest != contract.image_digest
+                                or stage_provenance.base_image_reference
+                                != contract.base_image_reference
+                            or stage_provenance.dependency_lock_sha256
+                            != contract.dependency_lock_sha256
+                            or stage_provenance.contract_sha256 != spec_artifact.sha256
+                            or stage_provenance.entrypoint != contract.entrypoint
+                            or stage_provenance.git_commit != contract.git_commit
+                            or stage_provenance.git_dirty != contract.git_dirty
+                            or stage_provenance.solver_name != contract.solver_name
+                            or stage_provenance.solver_version != contract.solver_version
+                            or stage_provenance.mesh_sha256 != contract.mesh_sha256
+                            or stage_provenance.mesh_parameters != contract.mesh_parameters
+                            or stage_provenance.material_profile_id
+                            != contract.material_profile_id
+                            or stage_provenance.material_profile_sha256
+                            != contract.material_profile_sha256
+                            or stage_provenance.boundary_condition_set_id
+                            != contract.boundary_condition_set_id
+                            or stage_provenance.mpi_ranks != contract.mpi_ranks
+                            or stage_provenance.omp_threads != contract.omp_threads
+                            or stage_provenance.cpu_count != contract.cpu_count
+                            or stage_provenance.memory_limit_bytes != contract.memory_limit_bytes
+                            or [item.model_dump(mode="json") for item in stage_provenance.inputs]
+                            != expected_inputs
+                            or [item.model_dump(mode="json") for item in stage_provenance.outputs]
+                            != [expected_output]
+                            or not {"python", "pydantic"}.issubset(
+                                stage_provenance.runtime_versions
+                            )
+                            or not (
+                                execution.started_at
+                                <= stage_provenance.started_at
+                                <= stage_provenance.completed_at
+                                <= execution.completed_at
+                            )
+                        ):
+                            raise ValueError(
+                                "stage provenance does not match its immutable contract, image, "
+                                "or artifacts"
+                            )
+                    else:
+                        provenance = json.loads(provenance_bytes)
+                        expected_legacy_provenance = {
+                            "schema_version": 1,
+                            "run_id": run_id,
+                            "stage_id": contract.stage_id,
+                            "operation": contract.operation,
+                            "inputs": [
+                                {
+                                    "name": item.name,
+                                    "sha256": item.sha256,
+                                    "size_bytes": item.size_bytes,
+                                }
+                                for item in contract.inputs
+                            ],
+                            "outputs": [
+                                {
+                                    "name": "result.json",
+                                    "sha256": hashlib.sha256(output_bytes).hexdigest(),
+                                    "size_bytes": len(output_bytes),
+                                }
+                            ],
+                        }
+                        if provenance != expected_legacy_provenance:
+                            raise ValueError(
+                                "stage provenance does not match its immutable inputs and outputs"
+                            )
+                except (
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                    ValidationError,
+                    ValueError,
+                ) as error:
                     execution = _replace_execution_failure(execution, str(error))
                 else:
                     result_artifact = self.artifacts.put_bytes(
@@ -371,11 +504,15 @@ class RunService:
         if log_artifact is not None:
             outputs.append(log_artifact)
         stage = StageRecord(
+            provenance_schema_version=contract.schema_version,
             stage_id="experimental-reduction",
             operation=submission.operation,
             status="succeeded" if execution.success else "failed",
             image_digest=image.digest,
-            command=("python", "-m", "fdm_strength.exp_reduction_stage"),
+            image_reference=contract.image_reference,
+            base_image_reference=contract.base_image_reference,
+            dependency_lock_sha256=contract.dependency_lock_sha256,
+            command=contract.entrypoint,
             input_artifacts=(spec_artifact, *direct_inputs),
             output_artifacts=tuple(
                 artifact
@@ -389,10 +526,13 @@ class RunService:
             ),
             git_commit=image.git_commit,
             git_dirty=image.git_dirty,
-            cpu_count=STAGE_CPU_COUNT,
-            memory_limit_bytes=STAGE_MEMORY_LIMIT_BYTES,
+            mpi_ranks=contract.mpi_ranks if contract.schema_version == 2 else None,
+            omp_threads=contract.omp_threads if contract.schema_version == 2 else None,
+            cpu_count=contract.cpu_count,
+            memory_limit_bytes=contract.memory_limit_bytes,
         )
         run = Run(
+            schema_version=contract.schema_version,
             id=run_id,
             created_at=execution.completed_at,
             operation=submission.operation,

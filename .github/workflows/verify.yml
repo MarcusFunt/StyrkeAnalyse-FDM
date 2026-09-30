@@ -34,7 +34,9 @@ jobs:
       - name: Build frontend
         run: npm run build --prefix frontend
       - name: Build pinned experimental-reduction image
-        run: docker build --build-arg GIT_COMMIT="${GITHUB_SHA}" --build-arg GIT_DIRTY=false -f docker/exp-reduction.Dockerfile -t styrkeanalyse-fdm:exp-reduction .
+        run: |
+          FDM_DEPENDENCY_LOCK_SHA256="$(sha256sum uv.lock | cut -d ' ' -f 1)"
+          docker build --build-arg FDM_DEPENDENCY_LOCK_SHA256="${FDM_DEPENDENCY_LOCK_SHA256}" --build-arg GIT_COMMIT="${GITHUB_SHA}" --build-arg GIT_DIRTY=false -f docker/exp-reduction.Dockerfile -t styrkeanalyse-fdm:exp-reduction .
       - name: Install Playwright Chromium
         run: npx --prefix frontend playwright install --with-deps chromium
       - name: Run browser, mobile, and accessibility checks

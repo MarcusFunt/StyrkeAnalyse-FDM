@@ -6,9 +6,10 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+import fdm_strength.web as web
 from fdm_strength.experimental_reduction import reduce_campaign_workspace
 from fdm_strength.gui_analysis import analyze_tensile_rows
-from fdm_strength.web import _validated_workspace, create_gui_server
+from fdm_strength.web import GuiRequestHandler, _validated_workspace, create_gui_server
 
 
 def test_analyze_tensile_rows_converts_units_and_zeros_extension_at_first_point():
@@ -119,6 +120,35 @@ def test_gui_proxies_formal_run_submission_to_the_runner(monkeypatch):
         runner.shutdown()
         runner.server_close()
         runner_thread.join(timeout=2)
+
+
+def test_gui_proxy_does_not_report_a_completed_run_as_unavailable_after_client_disconnect(
+    monkeypatch,
+):
+    class RunnerResponse:
+        status = 201
+        headers = {"Content-Type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"run":{"status":"succeeded"}}'
+
+    class DisconnectedClient:
+        def _send_bytes(self, status, _body, _content_type):
+            assert status == 201
+            raise ConnectionAbortedError("browser closed the connection")
+
+        def _send_json(self, status, _payload):
+            pytest.fail(f"a completed runner response must not become HTTP {status}")
+
+    monkeypatch.setattr(web, "urlopen", lambda *_args, **_kwargs: RunnerResponse())
+
+    GuiRequestHandler._proxy_runner(DisconnectedClient(), "POST", "/api/runs", b"{}")
 
 
 def test_web_api_persists_studies_on_the_host_and_can_update_them(tmp_path):

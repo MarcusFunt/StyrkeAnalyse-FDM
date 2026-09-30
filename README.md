@@ -21,6 +21,9 @@ The project currently has three local development environments:
 - `exp-reduction` is the first one-shot scientific stage image. It preserves
   the uploaded CSV bytes and emits result and stage-provenance artifacts.
   `gui` can be shared privately over Tailscale Serve while bound to host loopback.
+- `fdm_strength.toolpath` parses supported linear G-code moves into an immutable,
+  hashed, millimetre-based `ToolpathModel`. It records deposition and travel
+  vectors; curved moves and unresolved coordinate transforms fail explicitly.
 
 The GUI workflow imports tensile CSV/TSV files, validates column mappings and
 specimen dimensions, and stores a versioned campaign/specimen record with test,
@@ -44,10 +47,11 @@ The physical tensile/bending-rig data acquisition is intentionally outside the
 container. It should write files such as CSV or Parquet; calibration and
 simulation run in this environment.
 
-The initial toolpath adapter uses the lightweight `gcodeparser` package. When
-timing-aware printer-motion boundary conditions become relevant, add
-`pyGCodeDecode` as a separately pinned Git dependency and record its commit in
-the simulation provenance; it is not needed to establish the core FEM runtime.
+The toolpath model is an initial M7 data layer only. It does not infer bead
+width, porosity, or local material properties, and it is not yet registered to
+specimens or mapped onto a mesh. When timing-aware printer-motion boundary
+conditions become relevant, add `pyGCodeDecode` as a separately pinned Git
+dependency and record its commit in the simulation provenance.
 
 ## Quick start: Windows + WSL2
 
@@ -164,30 +168,45 @@ off, remote access is unavailable.
 
 This release runs tensile baseline and replicate reduction workflows and stores
 saved workspaces on the desktop. It does not submit or monitor FEM simulation
-jobs. The solver verification gate is intentionally red until pinned DOLFINx
-and CalculiX images produce recorded convergence, patch-test, analytical
-agreement, and cross-solver evidence. FEM-versus-experiment comparison is not
-available before then. The GUI itself does not use the GPU, and the existing
-Compose configuration does not pass a GPU through to the FEM container.
+jobs. Stage provenance v2 records the resolved stage image ID, dependency-lock
+hash, contract and artifact hashes, source revision, runtime, and CPU/thread
+allocation for formal reduction runs. The DOLFINx development base image is
+pinned by digest. The solver verification gate remains red until actual
+DOLFINx/CalculiX solver images produce recorded convergence, patch-test,
+analytical-agreement, and cross-solver evidence. FEM-versus-experiment
+comparison is not available before then. The GUI itself does not use the GPU,
+and the existing Compose configuration does not pass a GPU through to the FEM
+container.
 
 ## Reproducibility rule
 
-Before generating results for the SOP, replace the default `stable` DOLFINx
-image with an exact release/digest in `.env`, rebuild, and commit that change:
+The DOLFINx base image defaults to this immutable release digest. If you override
+it in `.env`, keep the release digest form; the Dockerfile rejects a floating
+tag. The dependency-lock hash must match the checked-out `uv.lock`:
 
 ```dotenv
-DOLFINX_IMAGE=ghcr.io/fenics/dolfinx/dolfinx:<verified-release-or-digest>
+DOLFINX_IMAGE=ghcr.io/fenics/dolfinx/dolfinx:v0.11.0@sha256:2ae4bfbc0d9077268880faf04c72750528bee986c94ab223a2c159969bd56fa8
+FDM_DEPENDENCY_LOCK_SHA256=<sha256-of-uv.lock>
 ```
 
-The container image plus `uv.lock`, the input STL/G-code checksums, material
-profile, mesh size and git commit should be recorded with every simulation.
+Formal stage records bind the resolved image ID, lock hash, input/output
+checksums, stage contract, entrypoint, resource counts, git state, and timestamps.
+Solver runs still need to add their solver version, mesh, material, and boundary
+condition metadata and produce the M4 evidence before any FEM result is usable.
+
+Inspect a saved Run and verify its referenced stage-manifest artifacts from the
+runner data directory with:
+
+```bash
+fdm-strength provenance --run <run-uuid> --data-root /path/to/runner-data
+```
 
 ## Planned pipeline
 
 ```text
 STL + slicer G-code
         ↓
-normalised ToolpathModel
+normalised ToolpathModel (linear-motion parser implemented)
         ↓
 mesh/material-field mapping
         ↓

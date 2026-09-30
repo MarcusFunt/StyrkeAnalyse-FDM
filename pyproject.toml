@@ -27,6 +27,7 @@ dependencies = [
 ]
 
 [dependency-groups]
+exp-reduction = ["pydantic>=2.8,<3"]
 dev = [
   "docker==7.1.0",
   "hypothesis>=6.0,<7",

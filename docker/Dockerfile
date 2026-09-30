@@ -1,12 +1,20 @@
 # syntax=docker/dockerfile:1.7
 # The DOLFINx image supplies MPI, PETSc, petsc4py and dolfinx as one tested unit.
-ARG DOLFINX_IMAGE=ghcr.io/fenics/dolfinx/dolfinx:stable
+ARG DOLFINX_IMAGE=ghcr.io/fenics/dolfinx/dolfinx:v0.11.0@sha256:2ae4bfbc0d9077268880faf04c72750528bee986c94ab223a2c159969bd56fa8
+ARG FDM_DEPENDENCY_LOCK_SHA256
+ARG GIT_COMMIT=unknown
+ARG GIT_DIRTY=unknown
 FROM ${DOLFINX_IMAGE}
 
 # Copying the uv binary avoids a curl-pipe-shell installer during image builds.
 COPY --from=ghcr.io/astral-sh/uv:0.12.15 /uv /uvx /bin/
 
 USER root
+
+ARG DOLFINX_IMAGE
+ARG FDM_DEPENDENCY_LOCK_SHA256
+ARG GIT_COMMIT
+ARG GIT_DIRTY
 
 ARG USERNAME=fdm
 ARG USER_UID=1000
@@ -59,7 +67,17 @@ RUN uv venv --system-site-packages --python /dolfinx-env/bin/python /opt/venv \
     && printf '%s\n' "${base_site_packages}" > "${venv_site_packages}/dolfinx-env.pth" \
     && uv sync --frozen --all-groups \
     && uv pip install --python /opt/venv/bin/python --requirement /tmp/jupyter-requirements.txt \
+    && lock_sha256="$(sha256sum uv.lock | cut -d ' ' -f 1)" \
+    && test -n "${FDM_DEPENDENCY_LOCK_SHA256}" \
+    && test "${lock_sha256}" = "${FDM_DEPENDENCY_LOCK_SHA256}" \
+    && printf '%s\n' "${DOLFINX_IMAGE}" | grep -Eq '^ghcr\.io/fenics/dolfinx/dolfinx(:[^@]+)?@sha256:[0-9a-f]{64}$' \
     && chown -R "${USER_UID}:${USER_GID}" /opt/venv
+
+LABEL org.opencontainers.image.revision=${GIT_COMMIT} \
+      fdm.git.commit=${GIT_COMMIT} \
+      fdm.git.dirty=${GIT_DIRTY} \
+      fdm.base-image.reference=${DOLFINX_IMAGE} \
+      fdm.dependency-lock.sha256=${FDM_DEPENDENCY_LOCK_SHA256}
 
 WORKDIR /workspaces/styrkeanalyse-fdm
 USER ${USERNAME}

@@ -128,8 +128,8 @@ check whether it does.
 
 **Consequence for M0:** the pydantic schema is no longer an internal
 convenience, it is a published inter-process interface. It therefore needs a
-`schema_version` field from the first commit, and a test that old fixtures still
-load. This raises the value of the M0 work rather than lowering it.
+`schema_version` field from the first commit, with old records remaining
+readable. The Run and stage-contract models now support v1 and v2 records.
 
 ---
 
@@ -137,27 +137,50 @@ load. This raises the value of the M0 work rather than lowering it.
 
 The roadmap's M0 provenance record assumes one container produced the result.
 With a stage pipeline that is no longer true, and "the image digest" is
-ill-defined. The record needs to become a list of stages:
+ill-defined. Run v2 records a list of stages. The current experimental-reduction
+stage emits the following v2 manifest shape (solver fields are null for this
+non-solver stage):
 
 ```json
 {
   "run_id": "...",
-  "schema_version": "1.0",
+  "schema_version": 2,
   "git_commit": "...", "git_dirty": false,
   "stages": [
     {
-      "name": "gcode_to_voxel",
-      "image": "ghcr.io/…/fdm-voxel@sha256:…",
-      "entrypoint": ["fdm-voxel", "gcode-to-rve", "--spec", "/work/run.json"],
-      "inputs":  [{"path": "specimen.gcode", "sha256": "…"}],
-      "outputs": [{"path": "voxels.npz",     "sha256": "…"}],
+      "stage_id": "experimental-reduction",
+      "image_reference": "styrkeanalyse-fdm:exp-reduction",
+      "image_digest": "sha256:…",
+      "base_image_reference": "python:3.12-slim-bookworm",
+      "dependency_lock_sha256": "…",
+      "contract_sha256": "…",
+      "entrypoint": ["python", "-m", "fdm_strength.exp_reduction_stage"],
+      "inputs":  [{"name": "source.csv", "sha256": "…", "size_bytes": 123}],
+      "outputs": [{"name": "result.json", "sha256": "…", "size_bytes": 456}],
+      "solver_name": null,
+      "solver_version": null,
+      "mesh_sha256": null,
+      "mesh_parameters": null,
+      "material_profile_id": null,
+      "material_profile_sha256": null,
+      "boundary_condition_set_id": null,
       "mpi_ranks": 1,
       "omp_threads": 1,
-      "started": "…", "finished": "…"
+      "cpu_count": 1,
+      "memory_limit_bytes": 1073741824,
+      "started_at": "…", "completed_at": "…",
+      "runtime_versions": {"python": "…", "pydantic": "…"}
     }
   ]
 }
 ```
+
+The manifest is stored as a content-addressed artifact and linked from the
+immutable Run record. The runner verifies it against the saved contract, the
+resolved local image ID, the exact input/output bytes, and the executor time
+window. This formal stage currently reduces experimental data; the solver
+metadata fields are ready for FEM contracts but have not yet been populated by a
+solver run.
 
 Three details that are easy to miss and expensive later:
 
@@ -184,8 +207,10 @@ Three details that are easy to miss and expensive later:
    This is the mechanism that actually enforces the README's reproducibility
    rule, which is currently a sentence rather than a constraint.
 
-3. **Pin every image by digest, not tag** — the same rule the roadmap already
-   applies to `DOLFINX_IMAGE`, now multiplied by six.
+3. **Pin solver base images by digest and record each built stage image ID.**
+   DOLFINx now defaults to the official `v0.11.0` digest in Compose and the
+   Dockerfile. Formal stages record their resolved local image ID, even when
+   their local build reference is a tag.
 
 ---
 
@@ -254,15 +279,15 @@ cost against the part being graded.
 
 In rough order:
 
-1. Define the stage CLI contract (`--spec /work/run.json`, `/work/in`,
-   `/work/out`) and add `schema_version` to the pydantic models in M0.
-2. Pin `DOLFINX_IMAGE` to a digest — already required by roadmap §1.3.
-3. Extend `provenance.py` to the per-stage record in §4, including `mpi_ranks`
-   and `omp_threads`.
+1. Add formal FEM stages that populate solver/version, mesh hash/parameters,
+   material-profile hash, and boundary-condition-set identity in provenance.
+2. Pin and build the final solver image, including the CalculiX package version;
+   retain the final image ID alongside its base-image digest.
+3. Add a command target per stage, so the orchestrator remains a one-line change.
 4. Evaluate and pin dependencies before building any deferred image family.
-5. Add a `Makefile` with one target per stage, so the orchestrator is a
-   one-line change later.
-6. Revisit Kubernetes when either a cluster or a real sweep exists.
+5. Revisit Kubernetes when either a cluster or a real sweep exists.
 
-The three local development images are implemented. Formal result runs still
-need the baked-image and data-only mount workflow described above.
+The stage contract, versioned Run records, v2 provenance, and CLI manifest
+inspection are implemented for the first formal data-reduction stage. The
+development environments still bind-mount source; FEM result runs need baked
+solver images and the data-only mount workflow described above.

@@ -19,10 +19,14 @@ class ArtifactReference(FrozenModel):
 
 
 class StageRecord(FrozenModel):
+    provenance_schema_version: Literal[1, 2] = 1
     stage_id: str = Field(min_length=1, max_length=100)
     operation: str = Field(min_length=1, max_length=100)
     status: Literal["succeeded", "failed"]
     image_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    image_reference: str | None = Field(default=None, max_length=512)
+    base_image_reference: str | None = Field(default=None, max_length=512)
+    dependency_lock_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     command: tuple[str, ...] = Field(min_length=1)
     input_artifacts: tuple[ArtifactReference, ...]
     output_artifacts: tuple[ArtifactReference, ...]
@@ -31,6 +35,8 @@ class StageRecord(FrozenModel):
     duration_ms: int = Field(ge=0)
     git_commit: str = Field(min_length=1, max_length=128)
     git_dirty: bool | None
+    mpi_ranks: int | None = Field(default=None, ge=1, le=1024)
+    omp_threads: int | None = Field(default=None, ge=1, le=1024)
     cpu_count: int = Field(ge=1)
     memory_limit_bytes: int = Field(ge=1)
 
@@ -47,11 +53,23 @@ class StageRecord(FrozenModel):
             raise ValueError("stage completed_at cannot precede started_at")
         if self.status == "succeeded" and not self.output_artifacts:
             raise ValueError("a successful stage requires output artifacts")
+        if self.provenance_schema_version == 2:
+            if (
+                self.image_reference is None
+                or self.dependency_lock_sha256 is None
+                or self.mpi_ranks is None
+                or self.omp_threads is None
+            ):
+                raise ValueError("version 2 stage provenance is incomplete")
+            if self.mpi_ranks * self.omp_threads > self.cpu_count:
+                raise ValueError(
+                    "MPI ranks multiplied by OMP threads cannot exceed allocated CPUs"
+                )
         return self
 
 
 class Run(FrozenModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 1
     id: str = Field(
         pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     )
@@ -77,6 +95,10 @@ class Run(FrozenModel):
     def validate_completion(self) -> Run:
         if self.status == "succeeded" and (self.result_artifact is None or not self.stages):
             raise ValueError("a successful run requires a result artifact and completed stage")
+        if self.schema_version == 2 and any(
+            stage.provenance_schema_version != 2 for stage in self.stages
+        ):
+            raise ValueError("version 2 Run records require version 2 stage provenance")
         if self.status == "failed" and not self.error:
             raise ValueError("a failed run must include an error")
         if len(set(self.upstream_run_ids)) != len(self.upstream_run_ids):

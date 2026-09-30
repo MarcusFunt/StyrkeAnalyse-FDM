@@ -10,22 +10,24 @@ It is written against commit `0269782` (branch `main`) and against the project's
 source review (`Kilder – alle kilder med metoder`, 86 entries). Bracketed numbers
 such as [17] refer to that list; §10 maps each milestone back to its sources.
 
-## Implementation update — 2026-09-24
+## Implementation update — 2026-09-30
 
-This branch adds an experimental tensile workflow and solver-independent
-mechanics references. It does **not** contain a verified FEM solver result or
-an experimental validation result. Status by roadmap milestone:
+This branch adds an experimental tensile workflow, solver-independent
+mechanics references, stage-provenance v2 for the formal reduction stage, a
+digest-pinned DOLFINx development base, and the first G-code toolpath model. It
+does **not** contain a verified FEM solver result or an experimental validation
+result. Status by roadmap milestone:
 
 | Milestone | Current state on this branch |
 | --- | --- |
-| M0 foundations | Versioned campaign/specimen/test-run workspace, dimensional metadata, source-file SHA-256, and `mm / N / MPa` mechanics references exist. The full stage-by-stage solver provenance record and immutable solver image pins are still missing. |
+| M0 foundations | Versioned workspaces and `mm / N / MPa` mechanics references exist. Formal reduction runs now have stage-provenance v2 with resolved image ID, base-image reference, lock/contract/artifact hashes, command, git state, resources, timestamps, and runtime versions. The DOLFINx base defaults to a release pinned by digest. The schema has solver, mesh, material-profile, and boundary-condition provenance fields for future FEM stages. No FEM stage has produced such a record yet; M0's end-to-end solver provenance gate remains open. |
 | M1 analytical baselines | Tensile stress/strain and chord-modulus references plus three-point-bend nominal stress/strain/modulus functions have hand-calculated unit coverage. They are references, not a solver verification result. |
 | M2 CLT | Plane-stress lamina transforms, ABD assembly, and effective laminate moduli are implemented with analytical fixtures. No FEM cross-check has run. |
 | M3 experiment campaign | The desktop GUI imports tensile files, records campaign/configuration/specimen, test/print/sensor/compliance metadata and source provenance, and reduces one modulus per physical specimen. It reports mean, sample SD, CoV, valid `n`, and the roadmap `n ≥ 5`, `CoV ≤ 15%` readiness check. No physical campaign dataset is included. |
-| M4 isotropic FEM gate | A fail-closed evaluator checks all four roadmap verification records, tolerances, model digest, evidence hashes, and pinned DOLFINx/CalculiX image digests. The current environment has no pinned solver images or evidence artifacts, so the gate is **red** and experiment comparison is not allowed. |
+| M4 isotropic FEM gate | A fail-closed evaluator checks all four roadmap verification records, tolerances, model digest, evidence hashes, and pinned DOLFINx/CalculiX image digests. The DOLFINx base reference is now pinned, but there are no built solver image IDs or evidence artifacts, so the gate is **red** and experiment comparison is not allowed. |
 | M5 orthotropic | The five-constant transversely isotropic stiffness relation, maximum-stress index, and plane-stress Tsai–Wu reference are present. There is no orthotropic FEM adapter, calibrated strength data, CalculiX cross-check, or held-out prediction. `F12` remains an explicit caller-supplied assumption. |
 | M6 fracture | The isotropic elastic `J ↔ K` conversion and a bilinear cohesive traction envelope are analytical helpers only. There is no domain-integral implementation, DCB calibration record, cohesive solver, phase-field model, or fracture validation. |
-| M7 G-code fields | Not implemented. |
+| M7 G-code fields | The first data layer is implemented: `parse_toolpath(bytes)` hashes exact source bytes and emits immutable millimetre-based linear moves, extrusion, direction, raster angle, and deposition bounds. Curves and unsupported transforms fail explicitly. Specimen registration, mesh mapping, bead/porosity inference, local material fields, and FEM integration are not implemented. |
 
 The GUI has no FEM-versus-experiment comparison workflow today. If one is added,
 it must require the matching green M4 assessment; the five-specimen campaign
@@ -81,44 +83,31 @@ PyNite is a frame/truss solver and is "for groft til realistisk bead-level
 fracture" [57]. It is useful only as the classical beam cross-check in M1, and
 should not be planned into any later milestone.
 
-### 1.3 Defects to fix before they cost you a dataset
+### 1.3 Baseline defects and their current status
 
-These are small, but each one silently corrupts results or reproducibility later.
+These findings describe the audited baseline. Their current status is recorded
+below so baseline observations are not mistaken for the implementation today.
 
-1. **`DOLFINX_IMAGE` defaults to the moving `stable` tag.**
-   `compose.yaml` and `docker/Dockerfile` both default to
-   `ghcr.io/fenics/dolfinx/dolfinx:stable`. Two rebuilds a month apart are two
-   different solvers. The README states the rule ("replace with an exact
-   release/digest before generating results") but nothing enforces or records it.
-   Until this is pinned by digest, **no number produced in this container is
-   reproducible**, which makes it unusable for the SOP regardless of accuracy.
+1. **DOLFINx base image pinning is fixed; solver-run provenance remains open.**
+   Compose and the development Dockerfile default to the official
+   `v0.11.0` image pinned by digest, and the Dockerfile rejects a floating
+   `DOLFINX_IMAGE`. The digest and lock hash are recorded as image labels.
+   This pins the base runtime but does not establish a formal solver image or
+   an M4 result; those still need a built image ID, solver version, and evidence.
 
-2. **No unit convention is declared anywhere.**
-   This is the single most common cause of wrong FEM output. `mm / N / MPa /
-   tonne` and strict SI (`m / N / Pa / kg`) are both defensible; mixing them
-   silently produces results wrong by 10^6 with no error. Decide now, write it
-   down, and enforce it in code before the first solver call.
+2. **Fixed: mechanics units are declared.** `fdm_strength.units` defines
+   `mm / N / MPa` and the conversion from density in `kg/m³` to `tonne/mm³`.
 
-3. **`.gitignore` blocks your own reference data.**
-   Line 20 (`*.csv`) and line 21 (`*.parquet`) are global patterns.
-   `git check-ignore` confirms that `data/reference/coupons.csv` is ignored.
-   Ignoring bulk output is right; ignoring small committed golden/reference
-   datasets is not. Add negations, e.g.:
+3. **Fixed: `.gitignore` preserves reference data.**
+   The broad CSV, Parquet, and mesh ignores now have negations for
+   `data/reference/` and `tests/data/`.
 
-   ```gitignore
-   !data/reference/**/*.csv
-   !tests/data/**/*.csv
-   ```
+4. **Fixed: `inspect` reports SHA-256.** It now reports both input byte count
+   and the hash of the exact bytes read.
 
-   Also note `*.msh` is ignored, so no small mesh can be committed as a
-   regression fixture.
-
-4. **`inspect` records nothing.** Provenance has to start at the moment an input
-   file enters the environment. The command should emit a SHA-256, not a byte
-   count — it is a two-line change now and an archaeology exercise later.
-
-5. **The test suite provides no protection.** Tautological assertions on a
-   version constant will stay green through any physics error. See §7.
+5. **Improved: solver verification is still separate.** The current suite
+   covers data models, reductions, and analytical mechanics. It does not prove
+   that a FEM solver is implemented or verified; M4 remains the required gate.
 
 ---
 
@@ -320,12 +309,20 @@ the next milestone until the gate is green.
   boundary-condition set id; timestamp; hash of the result file.
   Because the pipeline runs as a chain of single-purpose containers, this is a
   list of stages rather than one record — see `execution-environments.md` §4.
-- Pin `DOLFINX_IMAGE` to a digest in `.env` and record it.
+- Keep `DOLFINX_IMAGE` pinned to a digest in `.env` and retain it in the image
+  labels and each formal solver stage's provenance.
 - Fix the `.gitignore` negations and make `inspect` emit a SHA-256.
 
 **Gate**
-`fdm-strength provenance --run <dir>` emits a complete record; schema round-trip
-tests pass; a deliberately modified input changes the recorded hash.
+Every stage in an actual FEM run emits a complete record tied to the resolved
+image ID, immutable contract, lock hash, input/output bytes, solver version,
+mesh parameters/hash, material profile, boundary-condition set, resource
+allocation, and timestamps. A deliberately modified input changes its recorded
+hash, and `fdm-strength provenance --run <uuid> --data-root <dir>` resolves the
+stored stage manifests. Existing v1 Run records remain readable. The current v2
+implementation covers the formal experimental-reduction stage and defines the
+solver metadata fields, but no FEM stage has yet run; this gate is therefore
+still open.
 
 ### M1 — Analytical baselines *(the oracle for everything after)*
 
@@ -658,17 +655,16 @@ Where each part of the plan comes from. Numbers refer to
 
 Ordered, each small enough to land independently:
 
-1. Pin `DOLFINX_IMAGE` to a digest; record it in `.env.example` and the README.
-2. Fix the `.gitignore` negations for `data/reference/` and `tests/data/`.
-3. Add `units.py` with the declared convention and conversion helpers.
-4. Add `schema.py` with `Specimen`, `MaterialProfile`, `PrintProfile`, `TestRun`.
-5. Add `provenance.py` plus `fdm-strength provenance`; make `inspect` hash inputs.
-6. Add pytest markers and drop the tautological version assertion.
-7. Add `analytical.py` with the tension and three-point-bend reductions + tests.
-8. Add `clt.py` with lamina → ABD → laminate moduli + hand-computed tests.
-9. Add `mesh.py` with a parametric ISO 527-2 1A bar in Gmsh.
-10. Add the DOLFINx isotropic solver and the convergence/patch-test verification.
-11. Add the CalculiX export and the cross-solver comparison test.
-12. Add the orthotropic constitutive model and failure-index post-processing.
+1. Add `schema.py` models for `MaterialProfile` and `PrintProfile` as the FEM
+   stages define their file contracts.
+2. Extend stage provenance v2 into the first baked FEM stage and persist actual
+   solver/version, mesh, material, and boundary-condition metadata.
+3. Build and record final DOLFINx/CalculiX solver image IDs; keep M4 fail-closed
+   until all evidence artifacts exist.
+4. Add `mesh.py` with a parametric ISO 527-2 1A bar in Gmsh.
+5. Add the DOLFINx isotropic solver and the convergence/patch-test verification.
+6. Add the CalculiX export and the cross-solver comparison test.
+7. Map the M7 toolpath model to specimen geometry and local material fields.
+8. Add the orthotropic constitutive model and failure-index post-processing.
 
 In parallel, starting now: finalise the M3 specimen matrix and print it.

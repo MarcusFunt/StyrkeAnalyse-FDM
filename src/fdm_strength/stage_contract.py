@@ -33,10 +33,28 @@ class StageInput(BaseModel):
 class StageContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal[1]
+    schema_version: Literal[1, 2]
     run_id: str
     stage_id: str
-    operation: Literal["tensile", "campaign"]
+    operation: str = Field(min_length=1, max_length=100)
+    image_reference: str | None = Field(default=None, max_length=512)
+    image_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    base_image_reference: str | None = Field(default=None, max_length=512)
+    dependency_lock_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    git_commit: str | None = Field(default=None, max_length=128)
+    git_dirty: bool | None = None
+    solver_name: str | None = Field(default=None, min_length=1, max_length=100)
+    solver_version: str | None = Field(default=None, min_length=1, max_length=100)
+    mesh_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    mesh_parameters: dict[str, Any] | None = None
+    material_profile_id: str | None = Field(default=None, min_length=1, max_length=128)
+    material_profile_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    boundary_condition_set_id: str | None = Field(default=None, min_length=1, max_length=128)
+    entrypoint: tuple[str, ...] = ("python", "-m", "fdm_strength.exp_reduction_stage")
+    mpi_ranks: int = Field(default=1, ge=1, le=1024)
+    omp_threads: int = Field(default=1, ge=1, le=1024)
+    cpu_count: int = Field(default=1, ge=1, le=1024)
+    memory_limit_bytes: int = Field(default=1024 * 1024 * 1024, ge=1)
     inputs: tuple[StageInput, ...]
     parameters: dict[str, Any]
     expected_outputs: tuple[str, ...] = Field(min_length=1)
@@ -58,6 +76,13 @@ class StageContract(BaseModel):
             raise ValueError("stage_id must be a safe name")
         return value
 
+    @field_validator("operation")
+    @classmethod
+    def validate_operation(cls, value: str) -> str:
+        if not _SAFE_NAME.fullmatch(value):
+            raise ValueError("operation must be a safe name")
+        return value
+
     @field_validator("expected_outputs")
     @classmethod
     def validate_output_names(cls, values: tuple[str, ...]) -> tuple[str, ...]:
@@ -68,11 +93,42 @@ class StageContract(BaseModel):
             raise ValueError("expected output filenames must be unique")
         return values
 
+    @field_validator("image_reference", "base_image_reference")
+    @classmethod
+    def validate_image_references(cls, value: str | None) -> str | None:
+        if value is not None and (
+            not value.strip() or any(character.isspace() for character in value)
+        ):
+            raise ValueError("image references must be non-empty and contain no whitespace")
+        return value
+
+    @field_validator("entrypoint")
+    @classmethod
+    def validate_entrypoint(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value or any(not part or "\x00" in part for part in value):
+            raise ValueError("entrypoint arguments must be non-empty and contain no NUL")
+        return value
+
     @model_validator(mode="after")
     def validate_input_names(self) -> StageContract:
         names = [artifact.name for artifact in self.inputs]
         if len(set(names)) != len(names):
             raise ValueError("stage input filenames must be unique")
+        if self.schema_version == 2:
+            if (
+                self.image_reference is None
+                or self.image_digest is None
+                or self.dependency_lock_sha256 is None
+                or self.git_commit is None
+                or self.mpi_ranks * self.omp_threads > self.cpu_count
+            ):
+                raise ValueError("version 2 stage contract is missing execution provenance")
+        if (self.solver_name is None) != (self.solver_version is None):
+            raise ValueError("solver name and version must be supplied together")
+        if (self.mesh_sha256 is None) != (self.mesh_parameters is None):
+            raise ValueError("mesh hash and mesh parameters must be supplied together")
+        if (self.material_profile_id is None) != (self.material_profile_sha256 is None):
+            raise ValueError("material profile ID and hash must be supplied together")
         return self
 
 
