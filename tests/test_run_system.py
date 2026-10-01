@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import socket
+import time
 from datetime import datetime, timezone
 from threading import Thread
 from urllib.request import Request, urlopen
@@ -9,6 +10,7 @@ from urllib.request import Request, urlopen
 import pytest
 from pydantic import ValidationError
 
+from fdm_strength.run_jobs import JobStore, RunJob
 from fdm_strength.run_models import ArtifactReference, Run, StageRecord
 from fdm_strength.run_store import ArtifactStore, RunStore
 from fdm_strength.runner import create_runner_server
@@ -16,7 +18,9 @@ from fdm_strength.runner_service import (
     RunService,
     RunSubmission,
     StageExecution,
+    StageImage,
     _send_archive_to_work,
+    _validate_formal_image,
 )
 from fdm_strength.stage_contract import load_stage_contract
 
@@ -304,7 +308,12 @@ def test_runner_http_api_submits_reads_and_replays_an_immutable_run(tmp_path):
             method="POST",
         )
         with urlopen(request) as response:
-            created = json.load(response)
+            assert response.status == 202
+            queued = json.load(response)
+        created = _wait_for_job(
+            f"http://127.0.0.1:{server.server_port}",
+            queued["job"]["id"],
+        )
         run_id = created["run"]["id"]
         digest = created["run"]["input_artifacts"][0]["sha256"]
 
@@ -320,7 +329,12 @@ def test_runner_http_api_submits_reads_and_replays_an_immutable_run(tmp_path):
             method="POST",
         )
         with urlopen(replay) as response:
-            replayed = json.load(response)
+            assert response.status == 202
+            replay_job = json.load(response)
+        replayed = _wait_for_job(
+            f"http://127.0.0.1:{server.server_port}",
+            replay_job["job"]["id"],
+        )
 
         assert stored["run"]["id"] == run_id
         assert restored_source == source
@@ -334,6 +348,72 @@ def test_runner_http_api_submits_reads_and_replays_an_immutable_run(tmp_path):
         server.server_close()
 
 
+def test_persistent_job_store_fails_interrupted_work_closed(tmp_path):
+    store = JobStore(tmp_path)
+    now = datetime.now(timezone.utc)
+    job = RunJob(
+        id="8e02d8f8-b1ab-4abc-9fe5-2f65173b6704",
+        operation="tensile",
+        status="queued",
+        created_at=now,
+        updated_at=now,
+    )
+    store.put(job)
+
+    assert store.fail_interrupted(now=now) == 1
+    restored = store.get(job.id)
+    assert restored.status == "failed"
+    assert restored.error == "runner restarted before this job completed"
+
+
+def test_formal_image_provenance_fails_closed():
+    _validate_formal_image(
+        StageImage(
+            digest="sha256:" + "a" * 64,
+            reference="repo/image@sha256:" + "b" * 64,
+            git_commit="1" * 40,
+            git_dirty=False,
+            base_image_reference="python:3.12-slim-bookworm@sha256:" + "c" * 64,
+            dependency_lock_sha256="d" * 64,
+        )
+    )
+    with pytest.raises(ValueError, match="Git commit"):
+        _validate_formal_image(
+            StageImage(
+                digest="sha256:" + "a" * 64,
+                reference="sha256:" + "a" * 64,
+                git_commit="unknown",
+                git_dirty=False,
+                base_image_reference="python:3.12-slim-bookworm@sha256:" + "c" * 64,
+                dependency_lock_sha256="d" * 64,
+            )
+        )
+    with pytest.raises(ValueError, match="clean Git checkout"):
+        _validate_formal_image(
+            StageImage(
+                digest="sha256:" + "a" * 64,
+                reference="sha256:" + "a" * 64,
+                git_commit="1" * 40,
+                git_dirty=True,
+                base_image_reference="python:3.12-slim-bookworm@sha256:" + "c" * 64,
+                dependency_lock_sha256="d" * 64,
+            )
+        )
+
+
+def _wait_for_job(base_url: str, job_id: str) -> dict:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        with urlopen(f"{base_url}/api/jobs/{job_id}") as response:
+            payload = json.load(response)
+        if payload["job"]["status"] == "succeeded":
+            return payload
+        if payload["job"]["status"] == "failed":
+            raise AssertionError(payload)
+        time.sleep(0.01)
+    raise AssertionError(f"job {job_id} did not finish")
+
+
 class _FakeStageExecutor:
     def __init__(self):
         self.seen_source_bytes = []
@@ -344,48 +424,68 @@ class _FakeStageExecutor:
 
         return StageImage(
             digest="sha256:" + "b" * 64,
+            reference="sha256:" + "b" * 64,
             git_commit="1" * 40,
             git_dirty=False,
+            base_image_reference="python:3.12-slim-bookworm@sha256:" + "a" * 64,
+            dependency_lock_sha256="d" * 64,
         )
 
-    def execute(self, contract_bytes, inputs, image_digest):
+    def execute(self, contract_bytes, inputs, image_digest, definition):
         from datetime import datetime, timezone
 
         from fdm_strength.stage_contract import StageContract
 
         contract = StageContract.model_validate_json(contract_bytes)
         self.seen_contracts.append(contract)
+        assert definition.stage_id == contract.stage_id
         source = inputs[contract.inputs[0].sha256]
         self.seen_source_bytes.append(source)
         result = json.dumps(
             {"schema_version": 1, "run_id": contract.run_id, "result": {"source": source.decode()}},
             sort_keys=True,
         ).encode()
-        provenance = json.dumps(
-            {
-                "schema_version": 1,
-                "run_id": contract.run_id,
-                "stage_id": contract.stage_id,
-                "operation": contract.operation,
-                "inputs": [
-                    {
-                        "name": item.name,
-                        "sha256": item.sha256,
-                        "size_bytes": item.size_bytes,
-                    }
-                    for item in contract.inputs
-                ],
-                "outputs": [
-                    {
-                        "name": "result.json",
-                        "sha256": hashlib.sha256(result).hexdigest(),
-                        "size_bytes": len(result),
-                    }
-                ],
-            },
-            sort_keys=True,
-        ).encode()
         now = datetime.now(timezone.utc)
+        from fdm_strength.provenance import ProvenanceArtifact, StageProvenance
+
+        provenance = StageProvenance(
+            run_id=contract.run_id,
+            stage_id=contract.stage_id,
+            operation=contract.operation,
+            image_reference=contract.image_reference,
+            image_digest=contract.image_digest,
+            base_image_reference=contract.base_image_reference,
+            dependency_lock_sha256=contract.dependency_lock_sha256,
+            contract_sha256=hashlib.sha256(contract_bytes).hexdigest(),
+            entrypoint=contract.entrypoint,
+            inputs=tuple(
+                ProvenanceArtifact(
+                    name=item.name,
+                    sha256=item.sha256,
+                    size_bytes=item.size_bytes,
+                    media_type=item.media_type,
+                )
+                for item in contract.inputs
+            ),
+            outputs=(
+                ProvenanceArtifact(
+                    name="result.json",
+                    sha256=hashlib.sha256(result).hexdigest(),
+                    size_bytes=len(result),
+                    media_type="application/vnd.styrkeanalyse.experimental-reduction+json",
+                ),
+            ),
+            git_commit=contract.git_commit,
+            git_dirty=contract.git_dirty,
+            mpi_ranks=contract.mpi_ranks,
+            omp_threads=contract.omp_threads,
+            openblas_threads=contract.openblas_threads,
+            cpu_count=contract.cpu_count,
+            memory_limit_bytes=contract.memory_limit_bytes,
+            started_at=now,
+            completed_at=now,
+            runtime_versions={"python": "3.12", "pydantic": "2.13.5"},
+        ).model_dump_json().encode()
         return StageExecution(
             success=True,
             outputs={"result.json": result, "provenance.json": provenance},

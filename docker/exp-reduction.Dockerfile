@@ -1,5 +1,7 @@
-FROM python:3.12-slim-bookworm
+ARG FDM_BASE_IMAGE=python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
+FROM ${FDM_BASE_IMAGE}
 
+ARG FDM_BASE_IMAGE
 ARG FDM_DEPENDENCY_LOCK_SHA256
 ARG GIT_COMMIT=unknown
 ARG GIT_DIRTY=unknown
@@ -11,7 +13,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH=/opt/venv/bin:${PATH}
 
 WORKDIR /app
-COPY --from=ghcr.io/astral-sh/uv:0.12.15 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.12.15@sha256:62f8c047d0a0e9ece6b53fc63df902585a67a47a7f318ddec4a37db586edc8e3 /uv /uvx /bin/
 COPY pyproject.toml uv.lock ./
 RUN uv venv --python /usr/local/bin/python /opt/venv \
     && uv sync --frozen --only-group exp-reduction --no-install-project \
@@ -37,7 +39,7 @@ RUN groupadd --system --gid 10001 stage \
 LABEL org.opencontainers.image.revision=${GIT_COMMIT} \
       fdm.git.commit=${GIT_COMMIT} \
       fdm.git.dirty=${GIT_DIRTY} \
-      fdm.base-image.reference=python:3.12-slim-bookworm \
+      fdm.base-image.reference=${FDM_BASE_IMAGE} \
       fdm.dependency-lock.sha256=${FDM_DEPENDENCY_LOCK_SHA256}
 
 USER stage

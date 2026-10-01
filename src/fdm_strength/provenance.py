@@ -54,8 +54,12 @@ class StageProvenance(_FrozenModel):
     material_profile_id: str | None = Field(default=None, min_length=1, max_length=128)
     material_profile_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     boundary_condition_set_id: str | None = Field(default=None, min_length=1, max_length=128)
+    boundary_condition_set_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     mpi_ranks: int = Field(ge=1, le=1024)
     omp_threads: int = Field(ge=1, le=1024)
+    openblas_threads: int = Field(default=1, ge=1, le=1024)
     cpu_count: int = Field(ge=1, le=1024)
     memory_limit_bytes: int = Field(ge=1)
     started_at: datetime
@@ -119,8 +123,14 @@ class StageProvenance(_FrozenModel):
             raise ValueError("mesh hash and mesh parameters must be supplied together")
         if (self.material_profile_id is None) != (self.material_profile_sha256 is None):
             raise ValueError("material profile ID and hash must be supplied together")
+        if (self.boundary_condition_set_id is None) != (
+            self.boundary_condition_set_sha256 is None
+        ):
+            raise ValueError("boundary-condition set ID and hash must be supplied together")
         if self.mpi_ranks * self.omp_threads > self.cpu_count:
             raise ValueError("MPI ranks multiplied by OMP threads cannot exceed allocated CPUs")
+        if self.openblas_threads > self.cpu_count:
+            raise ValueError("OpenBLAS threads cannot exceed allocated CPUs")
         if len({artifact.name for artifact in self.inputs}) != len(self.inputs):
             raise ValueError("stage input artifact names must be unique")
         if len({artifact.name for artifact in self.outputs}) != len(self.outputs):

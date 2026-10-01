@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from math import isfinite
 
-M4_REQUIRED_GATES = (
+ISOTROPIC_FEM_REQUIRED_GATES = (
     "manufactured_solution",
     "uniform_stress_patch",
     "analytical_agreement",
@@ -60,7 +60,7 @@ _REQUIRED_METRICS: dict[str, dict[str, tuple[str, float, str]]] = {
 }
 
 
-def evaluate_m4_gate(
+def evaluate_isotropic_fem_gate(
     evidence: Sequence[GateEvidence],
     pinned_solver_images: Mapping[str, str],
     *,
@@ -84,16 +84,16 @@ def evaluate_m4_gate(
     by_name: dict[str, GateEvidence] = {}
     duplicate_names: set[str] = set()
     for item in evidence:
-        if item.name not in M4_REQUIRED_GATES:
+        if item.name not in ISOTROPIC_FEM_REQUIRED_GATES:
             blockers.append(f"unknown verification gate: {item.name}")
             continue
         if item.name in by_name:
             duplicate_names.add(item.name)
         by_name[item.name] = item
 
-    missing = tuple(name for name in M4_REQUIRED_GATES if name not in by_name)
+    missing = tuple(name for name in ISOTROPIC_FEM_REQUIRED_GATES if name not in by_name)
     failed: list[str] = []
-    for name in M4_REQUIRED_GATES:
+    for name in ISOTROPIC_FEM_REQUIRED_GATES:
         item = by_name.get(name)
         if item is None:
             continue
@@ -142,10 +142,28 @@ def evaluate_m4_gate(
             failed.append(name)
             blockers.extend(f"{name}: {message}" for message in gate_blockers)
     if missing:
-        blockers.append("all four M4 verification gates must be recorded")
+        blockers.append("all four isotropic FEM verification gates must be recorded")
     return GateAssessment(
         comparison_allowed=not blockers,
         missing_gates=missing,
         failed_gates=tuple(failed),
         blockers=tuple(blockers),
+    )
+
+
+# Backward-compatible aliases for existing notebooks and saved references.
+M4_REQUIRED_GATES = ISOTROPIC_FEM_REQUIRED_GATES
+
+
+def evaluate_m4_gate(
+    evidence: Sequence[GateEvidence],
+    pinned_solver_images: Mapping[str, str],
+    *,
+    model_digest: str,
+) -> GateAssessment:
+    """Deprecated alias for :func:`evaluate_isotropic_fem_gate`."""
+    return evaluate_isotropic_fem_gate(
+        evidence,
+        pinned_solver_images,
+        model_digest=model_digest,
     )

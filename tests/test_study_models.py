@@ -26,6 +26,7 @@ def valid_workspace():
                 "geometry": {"width_mm": 10, "thickness_mm": 2, "gauge_length_mm": 50},
                 "print_metadata": {
                     "material": "PLA",
+                    "manufacturer": "Example Polymers",
                     "material_lot": "lot-23",
                     "printer": "printer-1",
                     "layer_height_mm": 0.2,
@@ -173,6 +174,7 @@ def test_configuration_defines_controlled_print_conditions_and_checks_specimens(
     workspace = StudyWorkspaceV2.model_validate(payload)
 
     assert workspace.campaign.configurations[0].printer == "printer-1"
+    assert workspace.campaign.configurations[0].manufacturer is None
     assert workspace.campaign.configurations[0].test_standard_revision == "ASTM D638-22"
 
     payload["specimens"][0]["print_metadata"]["printer"] = "printer-2"
@@ -203,10 +205,12 @@ def test_v2_configuration_migration_promotes_only_observed_values():
 
     assert migrated["version"] == 3
     assert migrated["campaign"]["configurations"][0]["material"] == "PLA"
+    assert migrated["campaign"]["configurations"][0]["manufacturer"] == "Example Polymers"
     assert migrated["campaign"]["configurations"][0]["printer"] == "printer-1"
     assert migrated["campaign"]["configurations"][0]["layer_height_mm"] == 0.2
     assert migrated["campaign"]["configurations"][0]["raster_strategy"] == "0/90"
     assert migrated["campaign"]["configurations"][0]["nozzle_temperature_c"] is None
+    assert migrated["specimens"][0]["print_metadata"]["manufacturer"] is None
     assert migrated["specimens"][0]["print_metadata"]["printer"] is None
     assert study_models.StudyWorkspaceV3.model_validate(migrated).version == 3
 

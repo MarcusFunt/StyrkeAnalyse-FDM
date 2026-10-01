@@ -144,6 +144,7 @@ def _validate_manifest_against_run(
         or manifest.git_dirty != stage.git_dirty
         or manifest.mpi_ranks != stage.mpi_ranks
         or manifest.omp_threads != stage.omp_threads
+        or manifest.openblas_threads != stage.openblas_threads
         or manifest.cpu_count != stage.cpu_count
         or manifest.memory_limit_bytes != stage.memory_limit_bytes
         or not (
@@ -173,8 +174,11 @@ def _validate_manifest_against_run(
         or contract.material_profile_id != manifest.material_profile_id
         or contract.material_profile_sha256 != manifest.material_profile_sha256
         or contract.boundary_condition_set_id != manifest.boundary_condition_set_id
+        or contract.boundary_condition_set_sha256
+        != manifest.boundary_condition_set_sha256
         or contract.mpi_ranks != manifest.mpi_ranks
         or contract.omp_threads != manifest.omp_threads
+        or contract.openblas_threads != manifest.openblas_threads
         or contract.cpu_count != manifest.cpu_count
         or contract.memory_limit_bytes != manifest.memory_limit_bytes
         or [item.model_dump(mode="json") for item in contract.inputs]

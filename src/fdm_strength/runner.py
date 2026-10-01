@@ -18,6 +18,7 @@ from fdm_strength.runner_service import RunService, RunSubmission
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
 DEFAULT_DATA_DIR = Path("/data")
 RUN_PATH = re.compile(r"^/api/runs/([0-9a-f-]{36})(?:/replay)?$")
+JOB_PATH = re.compile(r"^/api/jobs/([0-9a-f-]{36})$")
 ARTIFACT_PATH = re.compile(r"^/api/artifacts/([0-9a-f]{64})$")
 LOGGER = logging.getLogger("fdm_strength.runner")
 
@@ -66,6 +67,23 @@ class RunnerRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/health":
             self._send_json(200, {"status": "ok", "application": "fdm-runner"})
             return
+        job_match = JOB_PATH.fullmatch(path)
+        if job_match:
+            try:
+                job, run, result = self.service.read_job_payload(job_match.group(1))
+            except FileNotFoundError:
+                self._send_json(404, {"error": "Job not found"})
+                return
+            except ValueError as error:
+                self._send_json(500, {"error": str(error)})
+                return
+            payload: dict[str, Any] = {"job": job.model_dump(mode="json")}
+            if run is not None:
+                payload["run"] = run.model_dump(mode="json")
+            if result is not None:
+                payload["result"] = result
+            self._send_json(200, payload)
+            return
         artifact_match = ARTIFACT_PATH.fullmatch(path)
         if artifact_match:
             try:
@@ -82,14 +100,17 @@ class RunnerRequestHandler(BaseHTTPRequestHandler):
         match = RUN_PATH.fullmatch(path)
         if match and not path.endswith("/replay"):
             try:
-                run = self.service.read_run(match.group(1))
+                run, result = self.service.read_run_payload(match.group(1))
             except FileNotFoundError:
                 self._send_json(404, {"error": "Run not found"})
                 return
             except ValueError as error:
                 self._send_json(500, {"error": str(error)})
                 return
-            self._send_json(200, {"run": run.model_dump(mode="json")})
+            payload: dict[str, Any] = {"run": run.model_dump(mode="json")}
+            if result is not None:
+                payload["result"] = result
+            self._send_json(200, payload)
             return
         self._send_json(404, {"error": "Runner route not found"})
 
@@ -106,13 +127,21 @@ class RunnerRequestHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/runs":
                 submission = RunSubmission.model_validate_json(body)
-                run, result = self.service.submit(submission)
+                job = self.service.enqueue(submission)
             else:
                 match = RUN_PATH.fullmatch(path)
                 if match is None or not path.endswith("/replay"):
                     self._send_json(404, {"error": "Runner route not found"})
                     return
-                run, result = self.service.replay(match.group(1))
+                # The replay body is intentionally an empty JSON object. Reject
+                # accidental parameters so a replay cannot mutate the saved Run.
+                try:
+                    replay_payload = json.loads(body)
+                except json.JSONDecodeError as error:
+                    raise ValueError("Replay request must be valid JSON") from error
+                if replay_payload != {}:
+                    raise ValueError("Replay request body must be an empty JSON object")
+                job = self.service.enqueue_replay(match.group(1))
         except ValidationError as error:
             self._send_json(
                 400,
@@ -133,12 +162,9 @@ class RunnerRequestHandler(BaseHTTPRequestHandler):
             return
         except Exception:
             LOGGER.exception("Run request failed unexpectedly")
-            self._send_json(500, {"error": "Runner could not complete the request"})
+            self._send_json(500, {"error": "Runner could not queue the request"})
             return
-        response = {"run": run.model_dump(mode="json"), "result": result}
-        if run.error is not None:
-            response["error"] = run.error
-        self._send_json(201 if run.status == "succeeded" else 422, response)
+        self._send_json(202, {"job": job.model_dump(mode="json")})
 
 
 def create_runner_server(
