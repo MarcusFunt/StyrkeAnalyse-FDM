@@ -238,6 +238,78 @@ def test_runner_creates_a_run_and_replay_uses_saved_artifacts_and_image(tmp_path
     assert stage_provenance["inputs"][0]["sha256"] == original.input_artifacts[0].sha256
 
 
+def test_runner_submits_isotropic_fem_and_persists_all_declared_outputs(tmp_path):
+    from fdm_strength.fem_models import (
+        BoundaryConditionSet,
+        GmshMeshSettings,
+        IsotropicMaterialProfile,
+        IsotropicTensileRequest,
+        RectangularTensileSpecimen,
+        TensileLoad,
+        canonical_json_bytes,
+    )
+
+    request = IsotropicTensileRequest(
+        specimen=RectangularTensileSpecimen(
+            specimen_id="SYN-FEM-01", length_mm=50.0, width_mm=10.0, thickness_mm=2.0
+        ),
+        material=IsotropicMaterialProfile(
+            profile_id="PLA-isotropic-v1", youngs_modulus_mpa=2000.0, poissons_ratio=0.35
+        ),
+        load=TensileLoad(force_n=100.0),
+        boundary_conditions=BoundaryConditionSet(set_id="axial-pull-v1"),
+        mesh=GmshMeshSettings(max_cell_size_mm=2.5, element_order=2),
+    )
+    request_bytes = canonical_json_bytes(request)
+    executor = _FakeIsotropicFemExecutor()
+    service = RunService(tmp_path, executor=executor)
+    submission = RunSubmission(
+        operation="fdm-l2-isotropic",
+        input_file={
+            "filename": "request.json",
+            "media_type": "application/vnd.styrkeanalyse.fem-request+json",
+            "sha256": hashlib.sha256(request_bytes).hexdigest(),
+            "content_base64": base64.b64encode(request_bytes).decode("ascii"),
+        },
+        parameters={},
+        upstream_run_ids=(),
+    )
+
+    run, result = service.submit(submission)
+
+    assert run.status == "succeeded"
+    assert run.operation == "fdm-l2-isotropic"
+    assert result == {"nominal_stress_mpa": 5.0}
+    contract = executor.seen_contracts[0]
+    assert contract.stage_id == "fdm-l2-isotropic"
+    assert contract.solver_name == "DOLFINx"
+    assert contract.solver_version == "0.11.0.post0"
+    assert contract.mesh_parameters == request.mesh.model_dump(mode="json")
+    assert set(contract.expected_outputs) == {
+        "result.json",
+        "mesh.msh",
+        "fields.xdmf",
+        "fields.h5",
+        "provenance.json",
+    }
+    assert {item.media_type for item in run.stages[0].output_artifacts} == {
+        "application/vnd.styrkeanalyse.fem-result+json",
+        "application/vnd.gmsh.msh",
+        "application/vnd.xdmf+xml",
+        "application/x-hdf5",
+        "application/vnd.styrkeanalyse.stage-provenance+json",
+    }
+    assert len(run.stages[0].output_artifacts) == 5
+    assert all(service.artifacts.get_bytes(item.sha256) for item in run.stages[0].output_artifacts)
+
+    invalid_executor = _FakeIsotropicFemExecutor()
+    invalid_executor.corrupt_mesh_digest = True
+    invalid_service = RunService(tmp_path / "invalid", executor=invalid_executor)
+    invalid_run, _ = invalid_service.submit(submission)
+    assert invalid_run.status == "failed"
+    assert "provenance" in invalid_run.error
+
+
 def test_runner_rejects_uploaded_content_that_does_not_match_provenance(tmp_path):
     service = RunService(tmp_path, executor=_FakeStageExecutor())
     source = b"not the claimed input"
@@ -332,6 +404,107 @@ def test_runner_http_api_submits_reads_and_replays_an_immutable_run(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+class _FakeIsotropicFemExecutor:
+    def __init__(self):
+        self.seen_contracts = []
+        self.corrupt_mesh_digest = False
+
+    def inspect_image(self, image_reference=None):
+        from fdm_strength.runner_service import StageImage
+
+        return StageImage(
+            digest="sha256:" + "c" * 64,
+            git_commit="1" * 40,
+            git_dirty=False,
+            image_reference=image_reference,
+            base_image_reference="ghcr.io/fenics/dolfinx/dolfinx@sha256:" + "b" * 64,
+            dependency_lock_sha256="d" * 64,
+        )
+
+    def execute(self, contract_bytes, inputs, image_digest):
+        from datetime import datetime, timezone
+
+        from fdm_strength.provenance import ProvenanceArtifact, StageProvenance
+        from fdm_strength.runner_service import FEM_EXPECTED_OUTPUT_MEDIA_TYPES
+        from fdm_strength.stage_contract import StageContract
+
+        contract = StageContract.model_validate_json(contract_bytes)
+        self.seen_contracts.append(contract)
+        now = datetime.now(timezone.utc)
+        contents = {
+            "result.json": json.dumps(
+                {
+                    "schema_version": 1,
+                    "run_id": contract.run_id,
+                    "result": {"nominal_stress_mpa": 5.0},
+                },
+                sort_keys=True,
+            ).encode(),
+            "mesh.msh": b"gmsh mesh bytes",
+            "fields.xdmf": b"xdmf field index",
+            "fields.h5": b"hdf5 field values",
+        }
+        provenance = StageProvenance(
+            run_id=contract.run_id,
+            stage_id=contract.stage_id,
+            operation=contract.operation,
+            image_reference=contract.image_reference,
+            image_digest=image_digest,
+            base_image_reference=contract.base_image_reference,
+            dependency_lock_sha256=contract.dependency_lock_sha256,
+            contract_sha256=hashlib.sha256(contract_bytes).hexdigest(),
+            entrypoint=contract.entrypoint,
+            inputs=tuple(
+                ProvenanceArtifact(
+                    name=item.name,
+                    sha256=item.sha256,
+                    size_bytes=item.size_bytes,
+                    media_type=item.media_type,
+                )
+                for item in contract.inputs
+            ),
+            outputs=tuple(
+                ProvenanceArtifact(
+                    name=name,
+                    sha256=hashlib.sha256(contents[name]).hexdigest(),
+                    size_bytes=len(contents[name]),
+                    media_type=FEM_EXPECTED_OUTPUT_MEDIA_TYPES[name],
+                )
+                for name in sorted(contents)
+            ),
+            git_commit=contract.git_commit,
+            git_dirty=contract.git_dirty,
+            solver_name=contract.solver_name,
+            solver_version=contract.solver_version,
+            mesh_sha256=(
+                "0" * 64
+                if self.corrupt_mesh_digest
+                else hashlib.sha256(contents["mesh.msh"]).hexdigest()
+            ),
+            mesh_parameters=contract.mesh_parameters,
+            material_profile_id=contract.material_profile_id,
+            material_profile_sha256=contract.material_profile_sha256,
+            boundary_condition_set_id=contract.boundary_condition_set_id,
+            boundary_condition_set_sha256=contract.boundary_condition_set_sha256,
+            mpi_ranks=contract.mpi_ranks,
+            omp_threads=contract.omp_threads,
+            cpu_count=contract.cpu_count,
+            memory_limit_bytes=contract.memory_limit_bytes,
+            started_at=now,
+            completed_at=now,
+            runtime_versions={"python": "3.12", "pydantic": "2.11", "dolfinx": "0.11.0.post0"},
+        ).model_dump_json().encode()
+        return StageExecution(
+            success=True,
+            outputs={**contents, "provenance.json": provenance},
+            stdout=b"FEM stage completed",
+            stderr=b"",
+            started_at=now,
+            completed_at=now,
+            error=None,
+        )
 
 
 class _FakeStageExecutor:

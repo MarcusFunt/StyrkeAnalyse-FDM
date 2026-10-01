@@ -48,6 +48,37 @@ def test_fenicsx_venv_uses_the_base_dolfinx_interpreter():
     assert "dolfinx-env.pth" in dockerfile
 
 
+def test_formal_isotropic_image_is_pinned_and_bakes_the_solver_stage():
+    dockerfile = (ROOT / "docker/isotropic-fem.Dockerfile").read_text()
+    compose = (ROOT / "compose.yaml").read_text()
+    image_service = compose.split("  isotropic-fem:", 1)[1].split("\nvolumes:", 1)[0]
+
+    assert "@sha256:2ae4bfbc0d9077268880faf04c72750528bee986c94ab223a2c159969bd56fa8" in dockerfile
+    assert (
+        "ghcr.io/astral-sh/uv:0.12.15@"
+        "sha256:62f8c047d0a0e9ece6b53fc63df902585a67a47a7f318ddec4a37db586edc8e3"
+    ) in dockerfile
+    assert "uv sync --frozen --no-dev" in dockerfile
+    assert "gmsh==4.13.1" in dockerfile
+    assert "fdm.base-image.reference=${DOLFINX_IMAGE}" in dockerfile
+    assert 'CMD ["python", "-m", "fdm_strength.isotropic_fem_stage"]' in dockerfile
+    assert 'profiles: ["stage-build"]' in image_service
+    assert "image: styrkeanalyse-fdm:isotropic-fem" in image_service
+    assert "volumes:" not in image_service
+
+
+def test_formal_isotropic_image_preserves_base_dolfinx_pythonpath():
+    dockerfile = (ROOT / "docker/isotropic-fem.Dockerfile").read_text()
+
+    assert "PYTHONPATH=/app/src:${PYTHONPATH}" in dockerfile
+
+
+def test_formal_isotropic_image_uses_a_writable_ephemeral_fenics_cache():
+    dockerfile = (ROOT / "docker/isotropic-fem.Dockerfile").read_text()
+
+    assert "HOME=/tmp" in dockerfile
+
+
 def test_linux_environment_script_keeps_lf_line_endings_on_windows_checkouts():
     script = ROOT / "scripts/verify-environment.sh"
     assert b"\r\n" not in script.read_bytes()

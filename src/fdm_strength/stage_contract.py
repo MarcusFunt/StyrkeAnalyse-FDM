@@ -50,6 +50,7 @@ class StageContract(BaseModel):
     material_profile_id: str | None = Field(default=None, min_length=1, max_length=128)
     material_profile_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     boundary_condition_set_id: str | None = Field(default=None, min_length=1, max_length=128)
+    boundary_condition_set_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     entrypoint: tuple[str, ...] = ("python", "-m", "fdm_strength.exp_reduction_stage")
     mpi_ranks: int = Field(default=1, ge=1, le=1024)
     omp_threads: int = Field(default=1, ge=1, le=1024)
@@ -125,10 +126,18 @@ class StageContract(BaseModel):
                 raise ValueError("version 2 stage contract is missing execution provenance")
         if (self.solver_name is None) != (self.solver_version is None):
             raise ValueError("solver name and version must be supplied together")
-        if (self.mesh_sha256 is None) != (self.mesh_parameters is None):
-            raise ValueError("mesh hash and mesh parameters must be supplied together")
+        if self.schema_version == 1:
+            if (self.mesh_sha256 is None) != (self.mesh_parameters is None):
+                raise ValueError("mesh hash and mesh parameters must be supplied together")
+        elif self.mesh_sha256 is not None and self.mesh_parameters is None:
+            raise ValueError("a supplied mesh hash requires mesh parameters")
         if (self.material_profile_id is None) != (self.material_profile_sha256 is None):
             raise ValueError("material profile ID and hash must be supplied together")
+        if self.schema_version == 2 and (
+            (self.boundary_condition_set_id is None)
+            != (self.boundary_condition_set_sha256 is None)
+        ):
+            raise ValueError("boundary-condition set ID and hash must be supplied together")
         return self
 
 

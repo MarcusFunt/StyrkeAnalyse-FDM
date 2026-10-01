@@ -54,6 +54,7 @@ class StageProvenance(_FrozenModel):
     material_profile_id: str | None = Field(default=None, min_length=1, max_length=128)
     material_profile_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     boundary_condition_set_id: str | None = Field(default=None, min_length=1, max_length=128)
+    boundary_condition_set_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     mpi_ranks: int = Field(ge=1, le=1024)
     omp_threads: int = Field(ge=1, le=1024)
     cpu_count: int = Field(ge=1, le=1024)
@@ -89,9 +90,7 @@ class StageProvenance(_FrozenModel):
     @field_validator("image_reference", "base_image_reference")
     @classmethod
     def validate_image_reference(cls, value: str | None) -> str | None:
-        if value is not None and (
-            not value.strip() or any(char.isspace() for char in value)
-        ):
+        if value is not None and (not value.strip() or any(char.isspace() for char in value)):
             raise ValueError("image references must be non-empty and contain no whitespace")
         return value
 

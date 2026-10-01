@@ -19,6 +19,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from fdm_strength.fem_models import model_sha256
 from fdm_strength.provenance import StageProvenance
 from fdm_strength.run_models import ArtifactReference, Run, StageRecord
 from fdm_strength.run_store import ArtifactStore, RunStore
@@ -30,6 +31,16 @@ from fdm_strength.stage_contract import (
 from fdm_strength.study_models import StudyWorkspaceV3, migrate_workspace_v2_to_v3
 
 DEFAULT_IMAGE = "styrkeanalyse-fdm:exp-reduction"
+DEFAULT_FEM_IMAGE = "styrkeanalyse-fdm:isotropic-fem"
+FEM_OPERATION = "fdm-l2-isotropic"
+FEM_STAGE_ID = "fdm-l2-isotropic"
+FEM_ENTRYPOINT = ("python", "-m", "fdm_strength.isotropic_fem_stage")
+FEM_EXPECTED_OUTPUT_MEDIA_TYPES = {
+    "result.json": "application/vnd.styrkeanalyse.fem-result+json",
+    "mesh.msh": "application/vnd.gmsh.msh",
+    "fields.xdmf": "application/vnd.xdmf+xml",
+    "fields.h5": "application/x-hdf5",
+}
 MAX_INPUT_BYTES = 24 * 1024 * 1024
 STAGE_TIMEOUT_SECONDS = 120
 STAGE_CPU_COUNT = 1
@@ -56,7 +67,7 @@ class RunInputFile(BaseModel):
 class RunSubmission(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    operation: str = Field(pattern=r"^(tensile|campaign)$")
+    operation: str = Field(pattern=r"^(tensile|campaign|fdm-l2-isotropic)$")
     input_file: RunInputFile
     parameters: dict[str, Any]
     upstream_run_ids: tuple[str, ...] = ()
@@ -115,11 +126,7 @@ class DockerStageExecutor:
                 raise ValueError(
                     "stage image has no valid dependency-lock label; rebuild the pinned stage image"
                 )
-            if (
-                not isinstance(commit, str)
-                or not commit.strip()
-                or commit.lower() == "unknown"
-            ):
+            if not isinstance(commit, str) or not commit.strip() or commit.lower() == "unknown":
                 raise ValueError(
                     "stage image has no source revision label; rebuild it with GIT_COMMIT"
                 )
@@ -276,6 +283,18 @@ class RunService:
             raise ValueError(f"input file exceeds {MAX_INPUT_BYTES // (1024 * 1024)} MB")
         _validate_input_media_type(submission.operation, submission.input_file.media_type)
         parameters = _json_object(submission.parameters, "parameters")
+        fem_request = None
+        if submission.operation == FEM_OPERATION:
+            from fdm_strength.fem_models import IsotropicTensileRequest, canonical_json_bytes
+
+            try:
+                fem_request = IsotropicTensileRequest.model_validate_json(input_bytes)
+            except ValidationError as error:
+                raise ValueError(f"invalid fdm-l2-isotropic request: {error}") from error
+            if canonical_json_bytes(fem_request) != input_bytes:
+                raise ValueError("FEM request must use canonical JSON encoding")
+            if parameters:
+                raise ValueError("FEM parameters must be sealed in request.json")
         upstream_runs = self._resolve_upstream_runs(submission, input_bytes)
 
         run_id = str(uuid.uuid4())
@@ -284,7 +303,13 @@ class RunService:
             media_type=submission.input_file.media_type,
         )
         stage_input = StageInput(
-            name="source.csv" if submission.operation == "tensile" else "workspace.json",
+            name=(
+                "request.json"
+                if submission.operation == FEM_OPERATION
+                else "source.csv"
+                if submission.operation == "tensile"
+                else "workspace.json"
+            ),
             sha256=source_artifact.sha256,
             size_bytes=source_artifact.size_bytes,
             media_type=source_artifact.media_type,
@@ -301,17 +326,32 @@ class RunService:
             )
         )
         started_before_inspect = datetime.now(timezone.utc)
+        resolved_image_reference = image_reference or (
+            DEFAULT_FEM_IMAGE if submission.operation == FEM_OPERATION else DEFAULT_IMAGE
+        )
         try:
-            image = self.executor.inspect_image(image_reference)
+            image = self.executor.inspect_image(resolved_image_reference)
         except Exception as error:
             failed_contract = StageContract(
                 schema_version=1,
                 run_id=run_id,
-                stage_id="experimental-reduction",
+                stage_id=(
+                    FEM_STAGE_ID
+                    if submission.operation == FEM_OPERATION
+                    else "experimental-reduction"
+                ),
                 operation=submission.operation,
                 inputs=(stage_input,),
-                parameters={**parameters, "_source_filename": submission.input_file.filename},
-                expected_outputs=("result.json", "provenance.json"),
+                parameters=(
+                    {}
+                    if submission.operation == FEM_OPERATION
+                    else {**parameters, "_source_filename": submission.input_file.filename}
+                ),
+                expected_outputs=(
+                    (*FEM_EXPECTED_OUTPUT_MEDIA_TYPES, "provenance.json")
+                    if submission.operation == FEM_OPERATION
+                    else ("result.json", "provenance.json")
+                ),
             )
             spec_artifact = self.artifacts.put_bytes(
                 canonical_contract_bytes(failed_contract),
@@ -334,25 +374,66 @@ class RunService:
             return run, None
 
         provenance_schema_version = 2 if image.dependency_lock_sha256 else 1
+        if submission.operation == FEM_OPERATION and provenance_schema_version != 2:
+            raise ValueError("formal isotropic FEM requires a provenance-labeled stage image")
+        stage_id = (
+            FEM_STAGE_ID
+            if submission.operation == FEM_OPERATION
+            else "experimental-reduction"
+        )
+        stage_entrypoint = (
+            FEM_ENTRYPOINT
+            if submission.operation == FEM_OPERATION
+            else ("python", "-m", "fdm_strength.exp_reduction_stage")
+        )
+        expected_outputs = (
+            (*FEM_EXPECTED_OUTPUT_MEDIA_TYPES, "provenance.json")
+            if submission.operation == FEM_OPERATION
+            else ("result.json", "provenance.json")
+        )
+        stage_parameters = (
+            {}
+            if submission.operation == FEM_OPERATION
+            else {**parameters, "_source_filename": submission.input_file.filename}
+        )
         contract = StageContract(
             schema_version=provenance_schema_version,
             run_id=run_id,
-            stage_id="experimental-reduction",
+            stage_id=stage_id,
             operation=submission.operation,
-            image_reference=image.image_reference,
+            image_reference=image.image_reference or resolved_image_reference,
             image_digest=image.digest if provenance_schema_version == 2 else None,
             base_image_reference=image.base_image_reference,
             dependency_lock_sha256=image.dependency_lock_sha256,
             git_commit=image.git_commit,
             git_dirty=image.git_dirty,
-            entrypoint=("python", "-m", "fdm_strength.exp_reduction_stage"),
+            solver_name="DOLFINx" if fem_request is not None else None,
+            solver_version="0.11.0.post0" if fem_request is not None else None,
+            mesh_parameters=(
+                fem_request.mesh.model_dump(mode="json") if fem_request is not None else None
+            ),
+            material_profile_id=(
+                fem_request.material.profile_id if fem_request is not None else None
+            ),
+            material_profile_sha256=(
+                _fem_model_sha256(fem_request.material) if fem_request is not None else None
+            ),
+            boundary_condition_set_id=(
+                fem_request.boundary_conditions.set_id if fem_request is not None else None
+            ),
+            boundary_condition_set_sha256=(
+                _fem_model_sha256(fem_request.boundary_conditions)
+                if fem_request is not None
+                else None
+            ),
+            entrypoint=stage_entrypoint,
             mpi_ranks=1,
             omp_threads=1,
             cpu_count=STAGE_CPU_COUNT,
             memory_limit_bytes=STAGE_MEMORY_LIMIT_BYTES,
             inputs=(stage_input,),
-            parameters={**parameters, "_source_filename": submission.input_file.filename},
-            expected_outputs=("result.json", "provenance.json"),
+            parameters=stage_parameters,
+            expected_outputs=expected_outputs,
         )
         contract_bytes = canonical_contract_bytes(contract)
         spec_artifact = self.artifacts.put_bytes(
@@ -376,6 +457,13 @@ class RunService:
                 execution = _replace_execution_failure(execution, "stage omitted result.json")
             else:
                 try:
+                    expected_execution_outputs = set(contract.expected_outputs)
+                    if set(execution.outputs) != expected_execution_outputs:
+                        raise ValueError(
+                            "stage outputs do not match the immutable contract: "
+                            f"expected {sorted(expected_execution_outputs)}, "
+                            f"received {sorted(execution.outputs)}"
+                        )
                     result_payload = json.loads(output_bytes)
                     if (
                         not isinstance(result_payload, dict)
@@ -396,22 +484,36 @@ class RunService:
                         }
                         for item in contract.inputs
                     ]
-                    expected_output = {
-                        "name": "result.json",
-                        "sha256": hashlib.sha256(output_bytes).hexdigest(),
-                        "size_bytes": len(output_bytes),
-                        "media_type": "application/vnd.styrkeanalyse.experimental-reduction+json",
-                    }
                     if contract.schema_version == 2:
                         stage_provenance = StageProvenance.model_validate_json(provenance_bytes)
+                        declared_output_map = {
+                            item.name: item for item in stage_provenance.outputs
+                        }
+                        expected_output_names = set(contract.expected_outputs) - {"provenance.json"}
+                        expected_media_types = _expected_output_media_types(contract)
+                        output_manifest_matches = (
+                            set(declared_output_map) == expected_output_names
+                            and set(expected_media_types) == expected_output_names
+                            and all(
+                                declared_output_map[name].sha256
+                                == hashlib.sha256(execution.outputs[name]).hexdigest()
+                                and declared_output_map[name].size_bytes
+                                == len(execution.outputs[name])
+                                and declared_output_map[name].media_type
+                                == expected_media_types[name]
+                                for name in expected_output_names
+                                if name in execution.outputs
+                            )
+                            and all(name in execution.outputs for name in expected_output_names)
+                        )
                         if (
                             stage_provenance.run_id != run_id
                             or stage_provenance.stage_id != contract.stage_id
                             or stage_provenance.operation != contract.operation
                             or stage_provenance.image_reference != contract.image_reference
                             or stage_provenance.image_digest != contract.image_digest
-                                or stage_provenance.base_image_reference
-                                != contract.base_image_reference
+                            or stage_provenance.base_image_reference
+                            != contract.base_image_reference
                             or stage_provenance.dependency_lock_sha256
                             != contract.dependency_lock_sha256
                             or stage_provenance.contract_sha256 != spec_artifact.sha256
@@ -420,22 +522,38 @@ class RunService:
                             or stage_provenance.git_dirty != contract.git_dirty
                             or stage_provenance.solver_name != contract.solver_name
                             or stage_provenance.solver_version != contract.solver_version
-                            or stage_provenance.mesh_sha256 != contract.mesh_sha256
-                            or stage_provenance.mesh_parameters != contract.mesh_parameters
-                            or stage_provenance.material_profile_id
-                            != contract.material_profile_id
+                            or (
+                                contract.mesh_sha256 is not None
+                                and stage_provenance.mesh_sha256 != contract.mesh_sha256
+                            )
+                            or (
+                                contract.operation == FEM_OPERATION
+                                and (
+                                    declared_output_map.get("mesh.msh") is None
+                                    or stage_provenance.mesh_sha256
+                                    != declared_output_map["mesh.msh"].sha256
+                                    or stage_provenance.runtime_versions.get("dolfinx")
+                                    != contract.solver_version
+                                )
+                            )
+                            or (
+                                contract.mesh_parameters is not None
+                                and stage_provenance.mesh_parameters != contract.mesh_parameters
+                            )
+                            or stage_provenance.material_profile_id != contract.material_profile_id
                             or stage_provenance.material_profile_sha256
                             != contract.material_profile_sha256
                             or stage_provenance.boundary_condition_set_id
                             != contract.boundary_condition_set_id
+                            or stage_provenance.boundary_condition_set_sha256
+                            != contract.boundary_condition_set_sha256
                             or stage_provenance.mpi_ranks != contract.mpi_ranks
                             or stage_provenance.omp_threads != contract.omp_threads
                             or stage_provenance.cpu_count != contract.cpu_count
                             or stage_provenance.memory_limit_bytes != contract.memory_limit_bytes
                             or [item.model_dump(mode="json") for item in stage_provenance.inputs]
                             != expected_inputs
-                            or [item.model_dump(mode="json") for item in stage_provenance.outputs]
-                            != [expected_output]
+                            or not output_manifest_matches
                             or not {"python", "pydantic"}.issubset(
                                 stage_provenance.runtime_versions
                             )
@@ -467,10 +585,13 @@ class RunService:
                             ],
                             "outputs": [
                                 {
-                                    "name": "result.json",
-                                    "sha256": hashlib.sha256(output_bytes).hexdigest(),
-                                    "size_bytes": len(output_bytes),
+                                    "name": name,
+                                    "sha256": hashlib.sha256(execution.outputs[name]).hexdigest(),
+                                    "size_bytes": len(execution.outputs[name]),
                                 }
+                                for name in sorted(
+                                    set(contract.expected_outputs) - {"provenance.json"}
+                                )
                             ],
                         }
                         if provenance != expected_legacy_provenance:
@@ -485,15 +606,18 @@ class RunService:
                 ) as error:
                     execution = _replace_execution_failure(execution, str(error))
                 else:
-                    result_artifact = self.artifacts.put_bytes(
-                        output_bytes,
-                        media_type="application/vnd.styrkeanalyse.experimental-reduction+json",
-                    )
+                    output_media_types = _expected_output_media_types(contract)
+                    output_references = {
+                        name: self.artifacts.put_bytes(content, media_type=output_media_types[name])
+                        for name, content in execution.outputs.items()
+                        if name != "provenance.json"
+                    }
+                    result_artifact = output_references["result.json"]
                     provenance_artifact = self.artifacts.put_bytes(
                         provenance_bytes,
                         media_type="application/vnd.styrkeanalyse.stage-provenance+json",
                     )
-                    outputs.append(result_artifact)
+                    outputs.extend(output_references.values())
                     outputs.append(provenance_artifact)
                     result_value = result_payload["result"]
 
@@ -505,7 +629,7 @@ class RunService:
             outputs.append(log_artifact)
         stage = StageRecord(
             provenance_schema_version=contract.schema_version,
-            stage_id="experimental-reduction",
+            stage_id=contract.stage_id,
             operation=submission.operation,
             status="succeeded" if execution.success else "failed",
             image_digest=image.digest,
@@ -516,8 +640,8 @@ class RunService:
             input_artifacts=(spec_artifact, *direct_inputs),
             output_artifacts=tuple(
                 artifact
-                for artifact in (result_artifact, provenance_artifact)
-                if artifact is not None
+                for artifact in (*outputs,)
+                if artifact != log_artifact
             ),
             started_at=execution.started_at,
             completed_at=execution.completed_at,
@@ -738,6 +862,21 @@ def _validate_input_media_type(operation: str, media_type: str) -> None:
         "application/vnd.styrkeanalyse.study+json",
     }:
         raise ValueError("campaign input must be a JSON study workspace")
+    if operation == FEM_OPERATION and media_type not in {
+        "application/json",
+        "application/vnd.styrkeanalyse.fem-request+json",
+    }:
+        raise ValueError("fdm-l2-isotropic input must be a FEM request JSON document")
+
+
+def _fem_model_sha256(model: Any) -> str:
+    return model_sha256(model)
+
+
+def _expected_output_media_types(contract: StageContract) -> dict[str, str]:
+    if contract.operation == FEM_OPERATION:
+        return dict(FEM_EXPECTED_OUTPUT_MEDIA_TYPES)
+    return {"result.json": "application/vnd.styrkeanalyse.experimental-reduction+json"}
 
 
 def _json_object(value: dict[str, Any], label: str) -> dict[str, Any]:

@@ -168,11 +168,19 @@ def _validate_manifest_against_run(
         or contract.entrypoint != manifest.entrypoint
         or contract.solver_name != manifest.solver_name
         or contract.solver_version != manifest.solver_version
-        or contract.mesh_sha256 != manifest.mesh_sha256
-        or contract.mesh_parameters != manifest.mesh_parameters
+        or (
+            contract.mesh_sha256 is not None
+            and contract.mesh_sha256 != manifest.mesh_sha256
+        )
+        or (
+            contract.mesh_parameters is not None
+            and contract.mesh_parameters != manifest.mesh_parameters
+        )
         or contract.material_profile_id != manifest.material_profile_id
         or contract.material_profile_sha256 != manifest.material_profile_sha256
         or contract.boundary_condition_set_id != manifest.boundary_condition_set_id
+        or contract.boundary_condition_set_sha256
+        != manifest.boundary_condition_set_sha256
         or contract.mpi_ranks != manifest.mpi_ranks
         or contract.omp_threads != manifest.omp_threads
         or contract.cpu_count != manifest.cpu_count

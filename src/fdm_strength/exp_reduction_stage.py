@@ -102,6 +102,7 @@ def main() -> int:
                 material_profile_id=contract.material_profile_id,
                 material_profile_sha256=contract.material_profile_sha256,
                 boundary_condition_set_id=contract.boundary_condition_set_id,
+                boundary_condition_set_sha256=contract.boundary_condition_set_sha256,
                 mpi_ranks=contract.mpi_ranks,
                 omp_threads=contract.omp_threads,
                 cpu_count=contract.cpu_count,
