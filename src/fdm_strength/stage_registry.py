@@ -84,6 +84,7 @@ _ISOTROPIC_FEM = StageDefinition(
         "mesh.msh",
         "fields.xdmf",
         "fields.h5",
+        "field-preview.json",
         "provenance.json",
     ),
     timeout_seconds=600,

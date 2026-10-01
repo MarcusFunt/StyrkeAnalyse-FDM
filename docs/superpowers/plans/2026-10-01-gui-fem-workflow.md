@@ -39,13 +39,13 @@
 - Produce `build_surface_field_preview(points_mm: Sequence[Sequence[float]], tetrahedra: Sequence[Sequence[int]], von_mises_mpa: Sequence[float], axial_stress_mpa: Sequence[float], axial_displacement_mm: Sequence[float], mesh_sha256: str) -> bytes` with schema version 1, compact boundary points, sampled boundary triangles carrying element-average values, and strict finite/index validation.
 - The FEM stage adds `field-preview.json` to expected outputs and the result artifact manifest; runner validation checks schema, mesh digest, finite data, exact declared outputs, and media type.
 
-- [ ] Write `test_build_surface_field_preview_emits_all_faces_for_single_tetrahedron` and `test_build_surface_field_preview_excludes_shared_internal_face`; assert triangle count, values, and mesh digest.
-- [ ] Write `test_build_surface_field_preview_samples_deterministically_over_triangle_limit`; assert the 20,000-triangle cap and repeatable output.
-- [ ] Run `uv run --frozen pytest tests/test_fem_preview.py -q`; confirm the new helper is missing.
-- [ ] Implement the pure preview builder and stage/runner output contract.
-- [ ] Extend mocked stage outputs and strict artifact manifest tests for the preview.
-- [ ] Run `uv run --frozen pytest tests/test_fem_preview.py tests/test_fem_models.py tests/test_run_system.py -q`.
-- [ ] Commit as `feat: emit FEM field visualization preview`.
+- [x] Write `test_build_surface_field_preview_emits_all_faces_for_single_tetrahedron` and `test_build_surface_field_preview_excludes_shared_internal_face`; assert triangle count, values, and mesh digest.
+- [x] Write `test_build_surface_field_preview_samples_deterministically_over_triangle_limit`; assert the 20,000-triangle cap and repeatable output.
+- [x] Run `uv run --frozen pytest tests/test_fem_preview.py -q`; confirm the new helper is missing.
+- [x] Implement the pure preview builder and stage/runner output contract.
+- [x] Extend mocked stage outputs and strict artifact manifest tests for the preview.
+- [x] Run `uv run --frozen pytest tests/test_fem_preview.py tests/test_fem_models.py tests/test_run_system.py -q`.
+- [x] Commit as `feat: emit FEM field visualization preview`.
 
 ### Task 2: FEM input model and submission form
 

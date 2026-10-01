@@ -46,6 +46,7 @@ _ISOTROPIC_FEM_MEDIA_TYPES = {
     "mesh.msh": "application/vnd.gmsh.msh",
     "fields.xdmf": "application/vnd.xdmf+xml",
     "fields.h5": "application/x-hdf5",
+    "field-preview.json": "application/vnd.styrkeanalyse.fem-field-preview+json",
 }
 
 
@@ -1102,6 +1103,7 @@ def _validate_isotropic_fem_outputs(
 
     artifact_manifest = result_payload.get("artifacts")
     expected_artifact_names = {"mesh.msh", "fields.xdmf", "fields.h5"}
+    expected_artifact_names.add("field-preview.json")
     if not isinstance(artifact_manifest, dict) or set(artifact_manifest) != expected_artifact_names:
         raise ValueError("isotropic FEM result has an incomplete field artifact manifest")
     for name in sorted(expected_artifact_names):
@@ -1114,6 +1116,14 @@ def _validate_isotropic_fem_outputs(
             or record.get("media_type") != _ISOTROPIC_FEM_MEDIA_TYPES[name]
         ):
             raise ValueError(f"isotropic FEM result manifest does not match {name}")
+
+    from fdm_strength.fem_preview import validate_surface_field_preview
+
+    validate_surface_field_preview(
+        outputs["field-preview.json"],
+        mesh_sha256=mesh_digest,
+        cell_count=mesh["cell_count"],
+    )
 
     result = result_payload["result"]
     required_scalar_results = (

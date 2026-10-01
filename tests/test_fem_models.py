@@ -217,6 +217,7 @@ def test_solver_artifact_collection_does_not_require_result_written_later(tmp_pa
     (tmp_path / "mesh.msh").write_bytes(b"mesh")
     (tmp_path / "fields.xdmf").write_bytes(b"xdmf")
     (tmp_path / "fields.h5").write_bytes(b"hdf5")
+    (tmp_path / "field-preview.json").write_bytes(b"preview")
 
     artifacts = _collect_solver_artifacts(tmp_path)
 
@@ -224,6 +225,7 @@ def test_solver_artifact_collection_does_not_require_result_written_later(tmp_pa
         "mesh.msh": b"mesh",
         "fields.xdmf": b"xdmf",
         "fields.h5": b"hdf5",
+        "field-preview.json": b"preview",
     }
 
 
@@ -238,5 +240,6 @@ def test_isotropic_fem_uses_a_server_registered_stage_definition():
         "mesh.msh",
         "fields.xdmf",
         "fields.h5",
+        "field-preview.json",
         "provenance.json",
     )
