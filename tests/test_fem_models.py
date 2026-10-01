@@ -3,6 +3,7 @@ import hashlib
 import pytest
 from pydantic import ValidationError
 
+import fdm_strength.fem_models as fem_models
 from fdm_strength.fem_models import (
     BoundaryConditionSet,
     GmshMeshSettings,
@@ -50,6 +51,26 @@ def test_rectangular_tensile_reference_matches_closed_form():
     assert response.nominal_strain == pytest.approx(0.0025)
     assert response.axial_displacement_mm == pytest.approx(0.125)
     assert response.reaction_force_n == pytest.approx(100.0)
+
+
+def test_isotropic_lame_parameters_match_youngs_modulus_and_poisson_ratio():
+    lame_parameters = getattr(fem_models, "isotropic_lame_parameters", None)
+    assert callable(lame_parameters), "fem_models must expose isotropic_lame_parameters"
+
+    lame_lambda, shear_modulus = lame_parameters(2000.0, 0.35)
+
+    assert lame_lambda == pytest.approx(2000.0 * 0.35 / (1.35 * 0.30))
+    assert shear_modulus == pytest.approx(2000.0 / (2.0 * 1.35))
+
+
+def test_isotropic_lame_parameters_reject_unstable_inputs():
+    lame_parameters = getattr(fem_models, "isotropic_lame_parameters", None)
+    assert callable(lame_parameters), "fem_models must expose isotropic_lame_parameters"
+
+    with pytest.raises(ValueError, match="stable isotropic material"):
+        lame_parameters(2000.0, 0.5)
+    with pytest.raises(ValueError, match="finite numbers"):
+        lame_parameters(float("inf"), 0.3)
 
 
 def test_fem_request_is_immutable_and_hashes_canonical_json():

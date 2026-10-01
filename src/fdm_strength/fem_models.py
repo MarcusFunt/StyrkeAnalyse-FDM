@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from math import isfinite
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -121,6 +122,31 @@ def analytical_tensile_response(request: IsotropicTensileRequest) -> AnalyticalT
         axial_displacement_mm=extension,
         reaction_force_n=request.load.force_n,
     )
+
+
+def isotropic_lame_parameters(
+    youngs_modulus_mpa: float, poissons_ratio: float
+) -> tuple[float, float]:
+    """Return Lamé's first parameter and shear modulus for a stable isotropic solid."""
+    if (
+        isinstance(youngs_modulus_mpa, bool)
+        or isinstance(poissons_ratio, bool)
+        or not isinstance(youngs_modulus_mpa, (int, float))
+        or not isinstance(poissons_ratio, (int, float))
+        or not isfinite(youngs_modulus_mpa)
+        or not isfinite(poissons_ratio)
+        or youngs_modulus_mpa <= 0
+    ):
+        raise ValueError("Young's modulus must be positive and both inputs must be finite numbers")
+    if not -1.0 < poissons_ratio < 0.5:
+        raise ValueError("Poisson's ratio must describe a stable isotropic material")
+    mu = youngs_modulus_mpa / (2.0 * (1.0 + poissons_ratio))
+    lame_lambda = (
+        youngs_modulus_mpa
+        * poissons_ratio
+        / ((1.0 + poissons_ratio) * (1.0 - 2.0 * poissons_ratio))
+    )
+    return lame_lambda, mu
 
 
 def canonical_json_bytes(model: BaseModel) -> bytes:

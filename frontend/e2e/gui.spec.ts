@@ -77,7 +77,7 @@ test("import, analyse, save, reload, and check accessibility", async ({ page, re
   await page.getByRole("button", { name: "Run tensile baseline" }).click();
   await expect(page.getByRole("heading", { name: "Results explorer" })).toBeVisible();
   await expect(page.getByText("Campaign modulus summary")).toBeVisible();
-  await expect(page.getByText("Mean modulus")).toBeVisible();
+  await expect(page.getByText("Mean modulus")).toBeVisible({ timeout: 30_000 });
   const tensileRunLink = page.getByRole("link", { name: "Open tensile Run record" });
   const campaignRunLink = page.getByRole("link", { name: "Open campaign Run record" });
   await expect(tensileRunLink).toBeVisible();

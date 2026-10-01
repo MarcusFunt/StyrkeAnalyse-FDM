@@ -273,14 +273,110 @@ def test_m4_verification_gate_fails_closed_for_missing_evidence_and_pins() -> No
     assert "manufactured_solution" in rejected.failed_gates
 
 
+def test_m4_verification_gate_accepts_tensile_only_analytical_metrics() -> None:
+    model_digest = "sha256:" + "d" * 64
+    pins = {"dolfinx": "sha256:" + "a" * 64, "calculix": "sha256:" + "b" * 64}
+    evidence = [
+        GateEvidence(
+            name=name,
+            passed=True,
+            model_digest=model_digest,
+            artifact_sha256="c" * 64,
+            solver_image_digests=pins,
+            metrics=_passing_metrics(name),
+            recorded_at="2026-09-24T10:00:00Z",
+        )
+        for name in M4_REQUIRED_GATES
+    ]
+
+    assessment = evaluate_m4_gate(evidence, pins, model_digest=model_digest)
+
+    assert assessment.comparison_allowed
+    assert assessment.blockers == ()
+
+
+def test_m4_verification_gate_rejects_duplicate_evidence_and_image_mismatch() -> None:
+    model_digest = "sha256:" + "d" * 64
+    pins = {"dolfinx": "sha256:" + "a" * 64, "calculix": "sha256:" + "b" * 64}
+    evidence = [
+        GateEvidence(
+            name=name,
+            passed=True,
+            model_digest=model_digest,
+            artifact_sha256="c" * 64,
+            solver_image_digests=pins,
+            metrics=_passing_metrics(name),
+            recorded_at="2026-09-24T10:00:00Z",
+        )
+        for name in M4_REQUIRED_GATES
+    ]
+
+    duplicate = evaluate_m4_gate([*evidence, evidence[0]], pins, model_digest=model_digest)
+    assert not duplicate.comparison_allowed
+    assert any("duplicate evidence record" in blocker for blocker in duplicate.blockers)
+
+    wrong_image = GateEvidence(
+        name=evidence[0].name,
+        passed=True,
+        model_digest=model_digest,
+        artifact_sha256=evidence[0].artifact_sha256,
+        solver_image_digests={**pins, "dolfinx": "sha256:" + "f" * 64},
+        metrics=evidence[0].metrics,
+        recorded_at=evidence[0].recorded_at,
+    )
+    mismatch = evaluate_m4_gate([wrong_image, *evidence[1:]], pins, model_digest=model_digest)
+    assert not mismatch.comparison_allowed
+    assert any("image digest" in blocker for blocker in mismatch.blockers)
+
+
+def test_m4_verification_gate_rejects_non_finite_metrics() -> None:
+    model_digest = "sha256:" + "d" * 64
+    pins = {"dolfinx": "sha256:" + "a" * 64, "calculix": "sha256:" + "b" * 64}
+    evidence = [
+        GateEvidence(
+            name=name,
+            passed=True,
+            model_digest=model_digest,
+            artifact_sha256="c" * 64,
+            solver_image_digests=pins,
+            metrics=_passing_metrics(name),
+            recorded_at="2026-09-24T10:00:00Z",
+        )
+        for name in M4_REQUIRED_GATES
+    ]
+    bad_metrics = {**evidence[0].metrics, "p1_l2_order": math.nan}
+    evidence[0] = GateEvidence(
+        name=evidence[0].name,
+        passed=True,
+        model_digest=model_digest,
+        artifact_sha256=evidence[0].artifact_sha256,
+        solver_image_digests=pins,
+        metrics=bad_metrics,
+        recorded_at=evidence[0].recorded_at,
+    )
+
+    assessment = evaluate_m4_gate(evidence, pins, model_digest=model_digest)
+
+    assert not assessment.comparison_allowed
+    assert any("non-finite" in blocker for blocker in assessment.blockers)
+
+
 def _passing_metrics(gate: str) -> dict[str, float]:
     return {
         "manufactured_solution": {"p1_l2_order": 2.0, "p2_l2_order": 3.0},
-        "uniform_stress_patch": {"relative_error": 1e-13},
-        "analytical_agreement": {
-            "tensile_relative_error": 0.0005,
-            "bend_relative_error": 0.005,
-            "clt_relative_error": 0.005,
+        "uniform_stress_patch": {
+            "stress_uniformity_relative_range": 1e-13,
+            "displacement_relative_error": 0.0005,
+            "reaction_force_relative_error": 0.0005,
         },
-        "calculix_crosscheck": {"relative_displacement_error": 0.004},
+        "analytical_agreement": {
+            "stress_relative_error": 0.0005,
+            "strain_relative_error": 0.0005,
+            "displacement_relative_error": 0.0005,
+            "reaction_force_relative_error": 0.0005,
+        },
+        "calculix_crosscheck": {
+            "relative_midspan_displacement_error": 0.004,
+            "relative_reaction_force_error": 0.004,
+        },
     }[gate]
