@@ -64,6 +64,19 @@ def isotropic_cauchy_stress(
     return lame_lambda * ufl.tr(epsilon) * ufl.Identity(3) + 2.0 * mu * epsilon
 
 
+def _tetrahedron_corner_dofs(geometry_dofmap: Any) -> Any:
+    """Return the four vertex geometry DOFs from DOLFINx's P1 or P2 cell map."""
+    import numpy as np
+
+    cell_dofs = np.asarray(geometry_dofmap)
+    if cell_dofs.ndim != 2 or cell_dofs.shape[1] < 4:
+        raise ValueError("tetrahedral geometry maps require at least four geometry nodes per cell")
+    corner_dofs = np.ascontiguousarray(cell_dofs[:, :4], dtype=np.int64)
+    if np.any(corner_dofs < 0) or np.any(np.diff(np.sort(corner_dofs, axis=1), axis=1) == 0):
+        raise ValueError("tetrahedral geometry maps contain invalid corner DOFs")
+    return corner_dofs
+
+
 def _collect_solver_artifacts(output_root: Path) -> dict[str, bytes]:
     """Read the mesh and fields created by the solver before result.json is written."""
     artifact_contents = {
@@ -350,11 +363,8 @@ def _solve_tensile_case(
 
     num_cells = int(comm.allreduce(domain.topology.index_map(domain.topology.dim).size_local))
     local_cell_count = domain.topology.index_map(domain.topology.dim).size_local
-    geometry_cells = domain.geometry.dofmap
-    tetrahedra = np.asarray(
-        [geometry_cells.links(cell)[:4] for cell in range(local_cell_count)],
-        dtype=np.int64,
-    )
+    geometry_cell_dofs = domain.geometry.dofmaps[0]
+    tetrahedra = _tetrahedron_corner_dofs(geometry_cell_dofs[:local_cell_count])
     vm_cell_values = []
     stress_cell_values = []
     displacement_cell_values = []
