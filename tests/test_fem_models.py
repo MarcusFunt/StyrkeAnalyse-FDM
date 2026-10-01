@@ -20,6 +20,7 @@ from fdm_strength.isotropic_fem_stage import (
     validate_stage_request,
 )
 from fdm_strength.stage_contract import StageContract, StageInput
+from fdm_strength.stage_registry import stage_for_operation
 
 
 def _request() -> IsotropicTensileRequest:
@@ -203,3 +204,18 @@ def test_solver_artifact_collection_does_not_require_result_written_later(tmp_pa
         "fields.xdmf": b"xdmf",
         "fields.h5": b"hdf5",
     }
+
+
+def test_isotropic_fem_uses_a_server_registered_stage_definition():
+    stage = stage_for_operation("fdm-l2-isotropic")
+
+    assert stage.stage_id == "fdm-l2-isotropic"
+    assert stage.image_reference == "styrkeanalyse-fdm:isotropic-fem"
+    assert stage.command == ("python", "-m", "fdm_strength.isotropic_fem_stage")
+    assert stage.expected_outputs == (
+        "result.json",
+        "mesh.msh",
+        "fields.xdmf",
+        "fields.h5",
+        "provenance.json",
+    )

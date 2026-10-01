@@ -132,5 +132,17 @@ services:
         GIT_DIRTY: ${GIT_DIRTY:-unknown}
     image: styrkeanalyse-fdm:exp-reduction
 
+  isotropic-fem:
+    profiles: ["stage-build"]
+    build:
+      context: .
+      dockerfile: docker/isotropic-fem.Dockerfile
+      args:
+        DOLFINX_IMAGE: ${DOLFINX_IMAGE:-ghcr.io/fenics/dolfinx/dolfinx:v0.11.0@sha256:2ae4bfbc0d9077268880faf04c72750528bee986c94ab223a2c159969bd56fa8}
+        FDM_DEPENDENCY_LOCK_SHA256: ${FDM_DEPENDENCY_LOCK_SHA256:-3f0a1a642abc5033dc132098cfbe78e315231b9ed0ff3a3a344cd9522ee5bf3c}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        GIT_DIRTY: ${GIT_DIRTY:-unknown}
+    image: styrkeanalyse-fdm:isotropic-fem
+
 volumes:
   gui_data:

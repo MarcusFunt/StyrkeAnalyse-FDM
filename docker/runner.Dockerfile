@@ -29,6 +29,7 @@ COPY src/fdm_strength/provenance.py /app/src/fdm_strength/provenance.py
 COPY src/fdm_strength/study_models.py /app/src/fdm_strength/study_models.py
 COPY src/fdm_strength/stage_contract.py /app/src/fdm_strength/stage_contract.py
 COPY src/fdm_strength/stage_registry.py /app/src/fdm_strength/stage_registry.py
+COPY src/fdm_strength/fem_models.py /app/src/fdm_strength/fem_models.py
 
 LABEL org.opencontainers.image.revision=${GIT_COMMIT} \
       fdm.git.commit=${GIT_COMMIT} \

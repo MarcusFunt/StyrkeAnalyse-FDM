@@ -26,9 +26,7 @@ def info() -> None:
 
 @app.command()
 def inspect(
-    path: Path = typer.Argument(
-        ..., exists=True, readable=True, file_okay=True, dir_okay=False
-    ),
+    path: Path = typer.Argument(..., exists=True, readable=True, file_okay=True, dir_okay=False),
 ) -> None:
     """Report an input file's size and SHA-256 before analysis."""
     digest = hashlib.sha256()
@@ -81,8 +79,7 @@ def provenance(
                         item
                         for item in stage.input_artifacts
                         if item.sha256 == manifest.contract_sha256
-                        and item.media_type
-                        == "application/vnd.styrkeanalyse.stage-contract+json"
+                        and item.media_type == "application/vnd.styrkeanalyse.stage-contract+json"
                     ),
                     None,
                 )
@@ -148,10 +145,7 @@ def _validate_manifest_against_run(
         or manifest.cpu_count != stage.cpu_count
         or manifest.memory_limit_bytes != stage.memory_limit_bytes
         or not (
-            stage.started_at
-            <= manifest.started_at
-            <= manifest.completed_at
-            <= stage.completed_at
+            stage.started_at <= manifest.started_at <= manifest.completed_at <= stage.completed_at
         )
     ):
         raise ValueError(f"stage {stage.stage_id} provenance does not match its Run record")
@@ -169,13 +163,15 @@ def _validate_manifest_against_run(
         or contract.entrypoint != manifest.entrypoint
         or contract.solver_name != manifest.solver_name
         or contract.solver_version != manifest.solver_version
-        or contract.mesh_sha256 != manifest.mesh_sha256
-        or contract.mesh_parameters != manifest.mesh_parameters
+        or (contract.mesh_sha256 is not None and contract.mesh_sha256 != manifest.mesh_sha256)
+        or (
+            contract.mesh_parameters is not None
+            and contract.mesh_parameters != manifest.mesh_parameters
+        )
         or contract.material_profile_id != manifest.material_profile_id
         or contract.material_profile_sha256 != manifest.material_profile_sha256
         or contract.boundary_condition_set_id != manifest.boundary_condition_set_id
-        or contract.boundary_condition_set_sha256
-        != manifest.boundary_condition_set_sha256
+        or contract.boundary_condition_set_sha256 != manifest.boundary_condition_set_sha256
         or contract.mpi_ranks != manifest.mpi_ranks
         or contract.omp_threads != manifest.omp_threads
         or contract.openblas_threads != manifest.openblas_threads
