@@ -190,13 +190,19 @@ test("submit a real FEM solve and inspect its mesh, fields, results and provenan
   await expect(page.getByRole("heading", { name: "Rectangular tensile specimen" })).toBeVisible();
   await page.getByRole("button", { name: "Submit FEM solve" }).click();
 
+  await expect(page.locator(".fem-status.queued, .fem-status.running")).toBeVisible({ timeout: 5_000 });
   await expect(page.getByText("Run succeeded")).toBeVisible({ timeout: 180_000 });
   await expect(page.getByRole("heading", { name: "Solve results and evidence" })).toBeVisible({ timeout: 30_000 });
   await expect(page.getByText("Reaction force", { exact: true })).toBeVisible();
   await expect(page.getByText("Not assessed for this Run")).toBeVisible();
   await expect(page.getByText("Not validated against experiment")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Surface mesh and field preview" })).toBeVisible();
-  await expect(page.getByRole("combobox", { name: "Field to visualize" })).toBeVisible();
+  const fieldSelector = page.getByRole("combobox", { name: "Field to visualize" });
+  await expect(fieldSelector).toBeVisible();
+  await fieldSelector.selectOption("axial_displacement_mm");
+  await expect(page.getByRole("img", { name: /Axial displacement uₓ surface field/ })).toBeVisible();
+  await page.getByRole("button", { name: "Rotate mesh right" }).click();
+  await page.getByRole("checkbox", { name: "Show mesh edges" }).uncheck();
   await expect(page.getByText(/surface approximation of element averages/)).toBeVisible();
 
   for (const artifactName of ["mesh.msh", "fields.xdmf", "fields.h5", "field-preview.json", "provenance.json"]) {

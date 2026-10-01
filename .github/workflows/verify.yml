@@ -190,6 +190,7 @@ jobs:
           assert {item["media_type"] for item in fem_run["run"]["stages"][0]["output_artifacts"]} == {
               "application/vnd.styrkeanalyse.fem-result+json",
               "application/vnd.gmsh.msh",
+              "application/vnd.styrkeanalyse.fem-field-preview+json",
               "application/vnd.xdmf+xml",
               "application/x-hdf5",
               "application/vnd.styrkeanalyse.stage-provenance+json",
