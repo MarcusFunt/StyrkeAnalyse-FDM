@@ -13,6 +13,7 @@ from fdm_strength.run_models import ArtifactReference, Run, StageRecord
 from fdm_strength.run_store import ArtifactStore, RunStore
 from fdm_strength.runner import create_runner_server
 from fdm_strength.runner_service import (
+    DockerStageExecutor,
     RunService,
     RunSubmission,
     StageExecution,
@@ -201,6 +202,63 @@ def test_archive_transfer_uses_writable_socket_inside_read_only_socketio():
         assert receiver.recv(1) == b""
     finally:
         receiver.close()
+
+
+def test_read_only_stage_has_private_writable_tmpfs_for_solver_jit(monkeypatch):
+    from types import ModuleType
+
+    from fdm_strength.stage_contract import StageContract, canonical_contract_bytes
+
+    created = {}
+
+    class FakeContainer:
+        def start(self):
+            pass
+
+        def remove(self, **_kwargs):
+            pass
+
+    class FakeContainers:
+        def create(self, _image, **kwargs):
+            created.update(kwargs)
+            return FakeContainer()
+
+    class FakeClient:
+        containers = FakeContainers()
+
+        def close(self):
+            pass
+
+    fake_docker = ModuleType("docker")
+    fake_docker.from_env = lambda **_kwargs: FakeClient()
+    monkeypatch.setitem(__import__("sys").modules, "docker", fake_docker)
+    monkeypatch.setattr(
+        "fdm_strength.runner_service._send_archive_to_work", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        DockerStageExecutor,
+        "_exec_with_timeout",
+        lambda *_args, **_kwargs: (b"", b"expected fake failure", 1),
+    )
+    contract = StageContract(
+        schema_version=1,
+        run_id="8e02d8f8-b1ab-4abc-9fe5-2f65173b6704",
+        stage_id="test-stage",
+        operation="tensile",
+        inputs=(),
+        parameters={},
+        expected_outputs=("result.json", "provenance.json"),
+    )
+
+    DockerStageExecutor().execute(
+        canonical_contract_bytes(contract), {}, "sha256:" + "b" * 64
+    )
+
+    assert created["read_only"] is True
+    assert "/work" in created["tmpfs"]
+    assert created["tmpfs"]["/tmp"] == (
+        "rw,exec,nosuid,nodev,size=268435456,uid=10001,gid=10001,mode=0700"
+    )
 
 
 def test_runner_creates_a_run_and_replay_uses_saved_artifacts_and_image(tmp_path):

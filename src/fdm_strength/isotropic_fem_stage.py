@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import os
 import platform
@@ -501,6 +502,7 @@ def main() -> int:
         solver_output = _solve_tensile_case(request, output_root)
         solver_output["runtime_versions"] = {
             "python": platform.python_version(),
+            "pydantic": importlib.metadata.version("pydantic"),
             "dolfinx": dolfinx.__version__,
             "gmsh": gmsh.__version__,
             "numpy": numpy.__version__,

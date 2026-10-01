@@ -180,7 +180,12 @@ class DockerStageExecutor:
                     "NUMEXPR_NUM_THREADS": str(contract.omp_threads),
                 },
                 tmpfs={
-                    "/work": ("rw,noexec,nosuid,nodev,size=134217728,uid=10001,gid=10001,mode=0770")
+                    "/work": (
+                        "rw,noexec,nosuid,nodev,size=134217728,uid=10001,gid=10001,mode=0770"
+                    ),
+                    "/tmp": (
+                        "rw,exec,nosuid,nodev,size=268435456,uid=10001,gid=10001,mode=0700"
+                    ),
                 },
             )
             container.start()
