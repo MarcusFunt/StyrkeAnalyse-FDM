@@ -18,6 +18,7 @@ from fdm_strength.fem_models import (
     IsotropicTensileRequest,
     analytical_tensile_response,
     canonical_json_bytes,
+    isotropic_lame_parameters,
     model_sha256,
 )
 from fdm_strength.provenance import ProvenanceArtifact, StageProvenance
@@ -41,6 +42,23 @@ _OUTPUT_MEDIA_TYPES = {
     "fields.xdmf": "application/vnd.xdmf+xml",
     "fields.h5": "application/x-hdf5",
 }
+
+
+def isotropic_strain(displacement: Any, ufl: Any) -> Any:
+    """Return the small-strain tensor used by both production and verification solves."""
+    return ufl.sym(ufl.grad(displacement))
+
+
+def isotropic_cauchy_stress(
+    displacement: Any,
+    youngs_modulus_mpa: float,
+    poissons_ratio: float,
+    ufl: Any,
+) -> Any:
+    """Return the isotropic linear-elastic stress expression used by all FEM cases."""
+    lame_lambda, mu = isotropic_lame_parameters(youngs_modulus_mpa, poissons_ratio)
+    epsilon = isotropic_strain(displacement, ufl)
+    return lame_lambda * ufl.tr(epsilon) * ufl.Identity(3) + 2.0 * mu * epsilon
 
 
 def _collect_solver_artifacts(output_root: Path) -> dict[str, bytes]:
@@ -127,6 +145,8 @@ def _require_runtime_policy(contract: StageContract, comm: Any) -> None:
 def _solve_tensile_case(
     request: IsotropicTensileRequest,
     output_root: Path,
+    *,
+    include_midspan_gauge: bool = False,
 ) -> dict[str, Any]:
     """Generate a tetrahedral mesh and solve small-strain 3D isotropic elasticity."""
     import gmsh
@@ -155,9 +175,19 @@ def _solve_tensile_case(
         gmsh.option.setNumber("General.Terminal", 0)
         if rank == 0:
             gmsh.model.add("rectangular_tensile_specimen")
-            volume = gmsh.model.occ.addBox(0.0, 0.0, 0.0, length, width, thickness)
+            if include_midspan_gauge:
+                # The verification mesh is partitioned at its gauge plane so both
+                # DOLFINx and CalculiX measure displacement at the same nodes.
+                left = gmsh.model.occ.addBox(0.0, 0.0, 0.0, length / 2.0, width, thickness)
+                right = gmsh.model.occ.addBox(
+                    length / 2.0, 0.0, 0.0, length / 2.0, width, thickness
+                )
+                fragments, _ = gmsh.model.occ.fragment([(3, left), (3, right)], [])
+                volumes = [tag for dimension, tag in fragments if dimension == 3]
+            else:
+                volumes = [gmsh.model.occ.addBox(0.0, 0.0, 0.0, length, width, thickness)]
             gmsh.model.occ.synchronize()
-            gmsh.model.addPhysicalGroup(3, [volume], tag=1)
+            gmsh.model.addPhysicalGroup(3, volumes, tag=1)
             gmsh.model.setPhysicalName(3, 1, "specimen")
             gmsh.option.setNumber("Mesh.MeshSizeMin", request.mesh.max_cell_size_mm * 0.2)
             gmsh.option.setNumber("Mesh.MeshSizeMax", request.mesh.max_cell_size_mm)
@@ -178,19 +208,16 @@ def _solve_tensile_case(
     trial = ufl.TrialFunction(V)
     test = ufl.TestFunction(V)
     identity = ufl.Identity(3)
-    mu = material.youngs_modulus_mpa / (2.0 * (1.0 + material.poissons_ratio))
-    lame_lambda = (
-        material.youngs_modulus_mpa
-        * material.poissons_ratio
-        / ((1.0 + material.poissons_ratio) * (1.0 - 2.0 * material.poissons_ratio))
-    )
 
     def strain(displacement):
-        return ufl.sym(ufl.grad(displacement))
+        return isotropic_strain(displacement, ufl)
 
     def cauchy_stress(displacement):
-        return lame_lambda * ufl.tr(strain(displacement)) * identity + 2.0 * mu * strain(
-            displacement
+        return isotropic_cauchy_stress(
+            displacement,
+            material.youngs_modulus_mpa,
+            material.poissons_ratio,
+            ufl,
         )
 
     epsilon = np.finfo(np.float64).eps * max(length, width, thickness) * 128
@@ -295,6 +322,12 @@ def _solve_tensile_case(
     if not np.any(at_loaded_end):
         raise ValueError("finite-element solution has no degrees of freedom on the loaded face")
     measured_extension = float(np.max(axial_displacement.x.array[at_loaded_end]))
+    at_midspan = np.isclose(dof_coordinates[:, 0], length / 2.0, atol=epsilon, rtol=0.0)
+    measured_midspan_displacement = (
+        float(np.mean(axial_displacement.x.array[at_midspan])) if np.any(at_midspan) else None
+    )
+    if include_midspan_gauge and measured_midspan_displacement is None:
+        raise ValueError("verification mesh is missing its partitioned midspan gauge plane")
     nominal_strain = measured_extension / length
 
     local_stress = stress_field.x.array.reshape((-1, 3, 3))[:, 0, 0]
@@ -318,6 +351,11 @@ def _solve_tensile_case(
             "reaction_force_n": reaction,
             "imposed_force_n": request.load.force_n,
             "measured_axial_displacement_mm": measured_extension,
+            **(
+                {"measured_midspan_displacement_mm": measured_midspan_displacement}
+                if measured_midspan_displacement is not None
+                else {}
+            ),
             "nominal_stress_mpa": analytical.nominal_stress_mpa,
             "nominal_strain": nominal_strain,
             "volume_average_axial_stress_mpa": mean_axial_stress,

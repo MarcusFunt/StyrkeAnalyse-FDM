@@ -10,7 +10,7 @@ It is written against commit `0269782` (branch `main`) and against the project's
 source review (`Kilder – alle kilder med metoder`, 86 entries). Bracketed numbers
 such as [17] refer to that list; §10 maps each milestone back to its sources.
 
-## Implementation update — 2026-09-30
+## Implementation update — 2026-10-01 (PR #9 merged)
 
 This branch adds an experimental tensile workflow, solver-independent
 mechanics references, stage-provenance v2 for the formal reduction stage, a
@@ -20,17 +20,19 @@ result. Status by roadmap milestone:
 
 | Milestone | Current state on this branch |
 | --- | --- |
-| M0 foundations | Versioned workspaces and `mm / N / MPa` mechanics references exist. Formal reduction runs now have stage-provenance v2 with resolved image ID, base-image reference, lock/contract/artifact hashes, command, git state, resources, timestamps, and runtime versions. The DOLFINx base defaults to a release pinned by digest. The schema has solver, mesh, material-profile, and boundary-condition provenance fields for future FEM stages. No FEM stage has produced such a record yet; M0's end-to-end solver provenance gate remains open. |
+| M0 foundations | Versioned workspaces and `mm / N / MPa` mechanics references exist. Formal reduction and FEM Runs use stage-provenance v2 with image identity, lock/contract/artifact hashes, command, git state, resources, timestamps, and runtime versions. The DOLFINx base is digest-pinned. PR #9 exercises solver provenance through a real asynchronous FEM solve and replay in CI. |
 | M1 analytical baselines | Tensile stress/strain and chord-modulus references plus three-point-bend nominal stress/strain/modulus functions have hand-calculated unit coverage. They are references, not a solver verification result. |
 | M2 CLT | Plane-stress lamina transforms, ABD assembly, and effective laminate moduli are implemented with analytical fixtures. No FEM cross-check has run. |
 | M3 experiment campaign | The desktop GUI imports tensile files, records campaign/configuration/specimen, test/print/sensor/compliance metadata and source provenance, and reduces one modulus per physical specimen. It reports mean, sample SD, CoV, valid `n`, and the roadmap `n ≥ 5`, `CoV ≤ 15%` readiness check. No physical campaign dataset is included. |
-| M4 isotropic FEM gate | A fail-closed evaluator checks all four roadmap verification records, tolerances, model digest, evidence hashes, and pinned DOLFINx/CalculiX image digests. The DOLFINx base reference is now pinned, but there are no built solver image IDs or evidence artifacts, so the gate is **red** and experiment comparison is not allowed. |
+| M4 isotropic FEM gate | PR #9 adds the formal `fdm-l2-isotropic` Gmsh + DOLFINx tensile stage, immutable inputs, mesh/field/result artifacts, solver/material/BC metadata, and provenance. The `codex/m4-isotropic-verification` branch adds solver-generated P1/P2 convergence, uniform-stress patch, closed-form tensile agreement, and same-mesh CalculiX evidence, bound to image IDs and artifact hashes. Its local report passes for that exact model configuration; Verify CI now builds both solver images and retains the report bundle. Physical FEM-versus-experiment validation is still pending measurements. |
 | M5 orthotropic | The five-constant transversely isotropic stiffness relation, maximum-stress index, and plane-stress Tsai–Wu reference are present. There is no orthotropic FEM adapter, calibrated strength data, CalculiX cross-check, or held-out prediction. `F12` remains an explicit caller-supplied assumption. |
 | M6 fracture | The isotropic elastic `J ↔ K` conversion and a bilinear cohesive traction envelope are analytical helpers only. There is no domain-integral implementation, DCB calibration record, cohesive solver, phase-field model, or fracture validation. |
 | M7 G-code fields | The first data layer is implemented: `parse_toolpath(bytes)` hashes exact source bytes and emits immutable millimetre-based linear moves, extrusion, direction, raster angle, and deposition bounds. Curves and unsupported transforms fail explicitly. Specimen registration, mesh mapping, bead/porosity inference, local material fields, and FEM integration are not implemented. |
 
-The GUI has no FEM-versus-experiment comparison workflow today. If one is added,
-it must require the matching green M4 assessment; the five-specimen campaign
+The browser GUI has no FEM setup, job, field-visualization, or FEM-versus-experiment
+workflow today. It currently explores experimental tensile force-extension and
+stress-strain curves and reports campaign readiness. Any FEM-versus-experiment
+view must require the matching green M4 assessment; the five-specimen campaign
 readiness check is not a substitute for solver verification. The specimen
 workflow is currently tensile-only and records metadata for later test types.
 
@@ -653,18 +655,27 @@ Where each part of the plan comes from. Numbers refer to
 
 ## 11. Immediate next commits
 
-Ordered, each small enough to land independently:
+The `codex/m4-isotropic-verification` branch now implements the solver-generated
+four-gate evidence bundle and connects it to Verify CI. After that branch is
+reviewed and integrated, the next pre-rig work is:
 
-1. Add `schema.py` models for `MaterialProfile` and `PrintProfile` as the FEM
-   stages define their file contracts.
-2. Extend stage provenance v2 into the first baked FEM stage and persist actual
-   solver/version, mesh, material, and boundary-condition metadata.
-3. Build and record final DOLFINx/CalculiX solver image IDs; keep M4 fail-closed
-   until all evidence artifacts exist.
-4. Add `mesh.py` with a parametric ISO 527-2 1A bar in Gmsh.
-5. Add the DOLFINx isotropic solver and the convergence/patch-test verification.
-6. Add the CalculiX export and the cross-solver comparison test.
-7. Map the M7 toolpath model to specimen geometry and local material fields.
-8. Add the orthotropic constitutive model and failure-index post-processing.
+1. Add three-point bending with an explicitly tested higher-order element.
+   Document mesh sensitivity and keep it as held-out validation geometry until
+   its own solver verification passes.
+2. Freeze the raw rig run and immutable calibration-record schema before the
+   firmware output contract is finalized; rehearse normal ingestion with
+   synthetic files.
+3. Implement orthotropic FEM with explicit material axes and failure criteria,
+   then verify it against analytical cases and CalculiX.
+4. Generate synthetic tensile campaigns and validate material fitting, frozen
+   profiles, and blind prediction/unblinding end-to-end.
+5. Extend the existing toolpath model through specimen registration and local
+   element orientation mapping after homogeneous orthotropic FEM works.
+6. Add the FEM GUI after the solver interface stabilizes, with field viewing,
+   scalar results, artifacts/provenance, and separate replicate-readiness,
+   solver-verification, and model-validation states.
 
-In parallel, starting now: finalise the M3 specimen matrix and print it.
+The GUI solver workflow follows the stable, verified solver interface. Keep
+replicate readiness, solver verification, and model validation as separate
+states. In parallel, finalise the M3 specimen matrix and print it when the rig
+schedule permits.

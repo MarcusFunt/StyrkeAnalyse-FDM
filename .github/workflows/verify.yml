@@ -41,6 +41,23 @@ jobs:
         run: |
           FDM_DEPENDENCY_LOCK_SHA256="$(sha256sum uv.lock | cut -d ' ' -f 1)"
           docker build --build-arg FDM_DEPENDENCY_LOCK_SHA256="${FDM_DEPENDENCY_LOCK_SHA256}" --build-arg GIT_COMMIT="${GITHUB_SHA}" --build-arg GIT_DIRTY=false -f docker/isotropic-fem.Dockerfile -t styrkeanalyse-fdm:isotropic-fem .
+      - name: Build pinned CalculiX verification image
+        run: docker build --build-arg GIT_COMMIT="${GITHUB_SHA}" --build-arg GIT_DIRTY=false -f docker/isotropic-calculix.Dockerfile -t styrkeanalyse-fdm:isotropic-calculix .
+      - name: Run four-gate isotropic FEM verification
+        run: |
+          mkdir -p artifacts/m4-isotropic
+          uv run --frozen python scripts/verify_isotropic_fem.py \
+            --dolfinx-image styrkeanalyse-fdm:isotropic-fem \
+            --calculix-image styrkeanalyse-fdm:isotropic-calculix \
+            --git-commit "${GITHUB_SHA}" \
+            --output-dir artifacts/m4-isotropic
+      - name: Retain M4 solver evidence and assessment
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m4-isotropic-verification-${{ github.sha }}
+          path: artifacts/m4-isotropic/
+          if-no-files-found: warn
       - name: Install Playwright Chromium
         run: npx --prefix frontend playwright install --with-deps chromium
       - name: Run browser, mobile, and accessibility checks

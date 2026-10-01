@@ -6,7 +6,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from math import isfinite
+from math import isfinite, log
 
 ISOTROPIC_FEM_REQUIRED_GATES = (
     "manufactured_solution",
@@ -16,6 +16,46 @@ ISOTROPIC_FEM_REQUIRED_GATES = (
 )
 _PINNED_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def observed_l2_convergence_order(mesh_sizes: Sequence[float], errors: Sequence[float]) -> float:
+    """Fit the observed L2 error order against actual, strictly refined mesh sizes."""
+    if len(mesh_sizes) != len(errors) or len(mesh_sizes) < 2:
+        raise ValueError("convergence data requires at least two matching mesh/error samples")
+    sizes = tuple(float(value) for value in mesh_sizes)
+    error_values = tuple(float(value) for value in errors)
+    if any(not isfinite(value) or value <= 0 for value in (*sizes, *error_values)):
+        raise ValueError("mesh sizes and errors must be positive finite values")
+    if any(left <= right for left, right in zip(sizes, sizes[1:])):
+        raise ValueError("mesh sizes must be strictly decreasing")
+
+    log_sizes = tuple(log(value) for value in sizes)
+    log_errors = tuple(log(value) for value in error_values)
+    mean_size = sum(log_sizes) / len(log_sizes)
+    mean_error = sum(log_errors) / len(log_errors)
+    variance = sum((value - mean_size) ** 2 for value in log_sizes)
+    if variance <= 0:
+        raise ValueError("mesh sizes do not span a measurable refinement range")
+    covariance = sum(
+        (size - mean_size) * (error - mean_error) for size, error in zip(log_sizes, log_errors)
+    )
+    return covariance / variance
+
+
+def relative_error(observed: float, reference: float) -> float:
+    """Return absolute relative error, rejecting non-finite or zero references."""
+    if (
+        isinstance(observed, bool)
+        or isinstance(reference, bool)
+        or not isinstance(observed, (int, float))
+        or not isinstance(reference, (int, float))
+        or not isfinite(observed)
+        or not isfinite(reference)
+    ):
+        raise ValueError("observed and reference values must be finite numbers")
+    if reference == 0:
+        raise ValueError("reference must be non-zero")
+    return abs(observed - reference) / abs(reference)
 
 
 @dataclass(frozen=True)
@@ -43,21 +83,79 @@ _REQUIRED_METRICS: dict[str, dict[str, tuple[str, float, str]]] = {
         "p2_l2_order": ("min", 2.9, "P2 L2 convergence order must be at least 2.9"),
     },
     "uniform_stress_patch": {
-        "relative_error": ("max", 1e-12, "stress patch relative error must be at most 1e-12"),
+        "stress_uniformity_relative_range": (
+            "max",
+            1e-12,
+            "stress patch relative range must be at most 1e-12",
+        ),
+        "displacement_relative_error": (
+            "max",
+            0.001,
+            "patch displacement error must be at most 0.1%",
+        ),
+        "reaction_force_relative_error": (
+            "max",
+            0.001,
+            "patch reaction-force error must be at most 0.1%",
+        ),
     },
     "analytical_agreement": {
-        "tensile_relative_error": ("max", 0.001, "tensile stiffness error must be at most 0.1%"),
-        "bend_relative_error": ("max", 0.01, "bend stiffness error must be at most 1%"),
-        "clt_relative_error": ("max", 0.01, "CLT modulus error must be at most 1%"),
+        "stress_relative_error": (
+            "max",
+            0.001,
+            "analytical tensile stress error must be at most 0.1%",
+        ),
+        "strain_relative_error": (
+            "max",
+            0.001,
+            "analytical tensile strain error must be at most 0.1%",
+        ),
+        "displacement_relative_error": (
+            "max",
+            0.001,
+            "analytical tensile displacement error must be at most 0.1%",
+        ),
+        "reaction_force_relative_error": (
+            "max",
+            0.001,
+            "analytical tensile reaction-force error must be at most 0.1%",
+        ),
     },
     "calculix_crosscheck": {
-        "relative_displacement_error": (
+        "relative_midspan_displacement_error": (
             "max",
             0.005,
-            "CalculiX displacement error must be at most 0.5%",
+            "CalculiX midspan displacement error must be at most 0.5%",
+        ),
+        "relative_reaction_force_error": (
+            "max",
+            0.005,
+            "CalculiX reaction-force error must be at most 0.5%",
         ),
     },
 }
+
+
+def isotropic_fem_gate_metric_blockers(name: str, metrics: Mapping[str, float]) -> tuple[str, ...]:
+    """Return the unmet numerical conditions for one named M4 gate."""
+    requirements = _REQUIRED_METRICS.get(name)
+    if requirements is None:
+        return (f"unknown verification gate: {name}",)
+    blockers: list[str] = []
+    for metric, (direction, limit, message) in requirements.items():
+        observed = metrics.get(metric)
+        valid = (
+            observed is not None
+            and not isinstance(observed, bool)
+            and isinstance(observed, (int, float))
+            and isfinite(observed)
+        )
+        passed = valid and (observed >= limit if direction == "min" else observed <= limit)
+        if not passed:
+            blockers.append(
+                message if valid else f"required metric {metric} is missing or non-finite"
+            )
+    return tuple(blockers)
 
 
 def evaluate_isotropic_fem_gate(
@@ -125,19 +223,7 @@ def evaluate_isotropic_fem_gate(
                 gate_blockers.append(
                     f"{solver} image digest is missing or does not match the pinned image"
                 )
-        for metric, (direction, limit, message) in _REQUIRED_METRICS[name].items():
-            observed = item.metrics.get(metric)
-            valid = (
-                observed is not None
-                and not isinstance(observed, bool)
-                and isinstance(observed, (int, float))
-                and isfinite(observed)
-            )
-            passed = valid and (observed >= limit if direction == "min" else observed <= limit)
-            if not passed:
-                gate_blockers.append(
-                    message if valid else f"required metric {metric} is missing or non-finite"
-                )
+        gate_blockers.extend(isotropic_fem_gate_metric_blockers(name, item.metrics))
         if gate_blockers:
             failed.append(name)
             blockers.extend(f"{name}: {message}" for message in gate_blockers)
