@@ -45,16 +45,19 @@ class StageDefinition:
             )
         if any(not item or "/" in item for item in self.operations):
             raise ValueError("stage operations must be non-empty simple names")
-        if min(
-            self.timeout_seconds,
-            self.cpu_count,
-            self.memory_limit_bytes,
-            self.work_size_bytes,
-            self.max_output_bytes,
-            self.mpi_ranks,
-            self.omp_threads,
-            self.openblas_threads,
-        ) <= 0:
+        if (
+            min(
+                self.timeout_seconds,
+                self.cpu_count,
+                self.memory_limit_bytes,
+                self.work_size_bytes,
+                self.max_output_bytes,
+                self.mpi_ranks,
+                self.omp_threads,
+                self.openblas_threads,
+            )
+            <= 0
+        ):
             raise ValueError("stage resource limits must be positive")
 
 
@@ -71,15 +74,33 @@ _EXPERIMENTAL_REDUCTION = StageDefinition(
     max_output_bytes=128 * MiB,
 )
 
+_ISOTROPIC_FEM = StageDefinition(
+    stage_id="fdm-l2-isotropic",
+    operations=("fdm-l2-isotropic",),
+    image_reference="styrkeanalyse-fdm:isotropic-fem",
+    command=("python", "-m", "fdm_strength.isotropic_fem_stage"),
+    expected_outputs=(
+        "result.json",
+        "mesh.msh",
+        "fields.xdmf",
+        "fields.h5",
+        "provenance.json",
+    ),
+    timeout_seconds=600,
+    cpu_count=2,
+    memory_limit_bytes=4 * GiB,
+    work_size_bytes=1024 * MiB,
+    max_output_bytes=512 * MiB,
+)
+
 STAGES: Mapping[str, StageDefinition] = MappingProxyType(
-    {_EXPERIMENTAL_REDUCTION.stage_id: _EXPERIMENTAL_REDUCTION}
+    {
+        _EXPERIMENTAL_REDUCTION.stage_id: _EXPERIMENTAL_REDUCTION,
+        _ISOTROPIC_FEM.stage_id: _ISOTROPIC_FEM,
+    }
 )
 OPERATIONS: Mapping[str, StageDefinition] = MappingProxyType(
-    {
-        operation: stage
-        for stage in STAGES.values()
-        for operation in stage.operations
-    }
+    {operation: stage for stage in STAGES.values() for operation in stage.operations}
 )
 
 

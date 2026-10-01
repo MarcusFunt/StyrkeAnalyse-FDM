@@ -37,6 +37,10 @@ jobs:
         run: |
           FDM_DEPENDENCY_LOCK_SHA256="$(sha256sum uv.lock | cut -d ' ' -f 1)"
           docker build --build-arg FDM_DEPENDENCY_LOCK_SHA256="${FDM_DEPENDENCY_LOCK_SHA256}" --build-arg GIT_COMMIT="${GITHUB_SHA}" --build-arg GIT_DIRTY=false -f docker/exp-reduction.Dockerfile -t styrkeanalyse-fdm:exp-reduction .
+      - name: Build pinned isotropic FEM image
+        run: |
+          FDM_DEPENDENCY_LOCK_SHA256="$(sha256sum uv.lock | cut -d ' ' -f 1)"
+          docker build --build-arg FDM_DEPENDENCY_LOCK_SHA256="${FDM_DEPENDENCY_LOCK_SHA256}" --build-arg GIT_COMMIT="${GITHUB_SHA}" --build-arg GIT_DIRTY=false -f docker/isotropic-fem.Dockerfile -t styrkeanalyse-fdm:isotropic-fem .
       - name: Install Playwright Chromium
         run: npx --prefix frontend playwright install --with-deps chromium
       - name: Run browser, mobile, and accessibility checks
@@ -130,5 +134,54 @@ jobs:
           replay = wait_job(replay_queued["job"]["id"])
           assert replay["run"]["status"] == "succeeded", replay
           assert replay["result"] == run_response["result"]
-          print("GUI-to-runner stage execution and immutable replay succeeded")
+
+          fem_request = {
+              "boundary_conditions": {
+                  "axial_axis": "x", "fixed_axial_face": "x_min",
+                  "prescribed_axial_face": "x_max", "set_id": "axial-pull-v1",
+                  "transverse_rigid_mode_control": "3d_minimal_rigid_mode_pins",
+                  "unloaded_faces": "traction_free",
+              },
+              "load": {"force_n": 100.0},
+              "material": {
+                  "poissons_ratio": 0.35, "profile_id": "PLA-isotropic-v1",
+                  "youngs_modulus_mpa": 2000.0,
+              },
+              "mesh": {"element_order": 2, "max_cell_size_mm": 2.5, "optimize": True},
+              "schema_version": 1,
+              "specimen": {
+                  "length_mm": 50.0, "specimen_id": "SYN-T01",
+                  "thickness_mm": 2.0, "width_mm": 10.0,
+              },
+          }
+          fem_source = (json.dumps(fem_request, sort_keys=True, separators=(",", ":")) + "\n").encode()
+          fem_payload = {
+              "operation": "fdm-l2-isotropic",
+              "input_file": {
+                  "filename": "request.json",
+                  "media_type": "application/vnd.styrkeanalyse.fem-request+json",
+                  "sha256": hashlib.sha256(fem_source).hexdigest(),
+                  "content_base64": base64.b64encode(fem_source).decode("ascii"),
+              },
+              "parameters": {},
+              "upstream_run_ids": [],
+          }
+          fem_queued = call("http://127.0.0.1:18010/api/runs", json.dumps(fem_payload).encode())
+          fem_run = wait_job(fem_queued["job"]["id"])
+          assert fem_run["run"]["status"] == "succeeded", fem_run
+          assert fem_run["run"]["schema_version"] == 2
+          assert {item["media_type"] for item in fem_run["run"]["stages"][0]["output_artifacts"]} == {
+              "application/vnd.styrkeanalyse.fem-result+json",
+              "application/vnd.gmsh.msh",
+              "application/vnd.xdmf+xml",
+              "application/x-hdf5",
+              "application/vnd.styrkeanalyse.stage-provenance+json",
+          }
+          fem_replay_queue = call(
+              f"http://127.0.0.1:18010/api/runs/{fem_run['run']['id']}/replay", b"{}"
+          )
+          fem_replay = wait_job(fem_replay_queue["job"]["id"])
+          assert fem_replay["run"]["status"] == "succeeded", fem_replay
+          assert fem_replay["result"] == fem_run["result"]
+          print("GUI-to-runner reduction and real isotropic FEM executions with immutable replays succeeded")
           PY

@@ -22,7 +22,7 @@ from fdm_strength.runner_service import (
     _send_archive_to_work,
     _validate_formal_image,
 )
-from fdm_strength.stage_contract import load_stage_contract
+from fdm_strength.stage_contract import StageContract, load_stage_contract
 
 
 def test_artifacts_are_content_addressed_and_byte_preserving(tmp_path):
@@ -242,6 +242,95 @@ def test_runner_creates_a_run_and_replay_uses_saved_artifacts_and_image(tmp_path
     assert stage_provenance["inputs"][0]["sha256"] == original.input_artifacts[0].sha256
 
 
+def test_isotropic_fem_runs_as_a_persistent_job_and_replays_saved_request(tmp_path):
+    executor = _FakeStageExecutor()
+    service = RunService(tmp_path, executor=executor)
+
+    queued = service.enqueue(_fem_submission())
+    completed = _wait_for_service_job(service, queued.id)
+    run = service.read_run(completed.run_id)
+    contract_value = StageContract.model_validate_json(
+        service.read_artifact(run.spec_artifact.sha256)
+    )
+
+    assert run.status == "succeeded"
+    assert contract_value.operation == "fdm-l2-isotropic"
+    assert contract_value.inputs[0].name == "request.json"
+    assert contract_value.parameters == {}
+    assert contract_value.solver_name == "DOLFINx"
+    assert contract_value.mesh_sha256 is None
+    assert contract_value.mesh_parameters == {
+        "max_cell_size_mm": 2.5,
+        "element_order": 2,
+        "optimize": True,
+    }
+    assert len(run.stages[0].output_artifacts) == 5
+    assert {item.media_type for item in run.stages[0].output_artifacts} == {
+        "application/vnd.styrkeanalyse.fem-result+json",
+        "application/vnd.gmsh.msh",
+        "application/vnd.xdmf+xml",
+        "application/x-hdf5",
+        "application/vnd.styrkeanalyse.stage-provenance+json",
+    }
+    provenance_reference = next(
+        item
+        for item in run.stages[0].output_artifacts
+        if item.media_type == "application/vnd.styrkeanalyse.stage-provenance+json"
+    )
+    fem_provenance = json.loads(service.read_artifact(provenance_reference.sha256))
+    mesh_reference = next(
+        item
+        for item in run.stages[0].output_artifacts
+        if item.media_type == "application/vnd.gmsh.msh"
+    )
+    assert fem_provenance["mesh_sha256"] == mesh_reference.sha256
+    from fdm_strength.cli import _validate_manifest_against_run
+    from fdm_strength.provenance import StageProvenance
+
+    _validate_manifest_against_run(
+        run.id,
+        run.stages[0],
+        contract_value,
+        StageProvenance.model_validate_json(
+            service.read_artifact(provenance_reference.sha256)
+        ),
+    )
+
+    replay_queued = service.enqueue_replay(run.id)
+    replay_job = _wait_for_service_job(service, replay_queued.id)
+    replay = service.read_run(replay_job.run_id)
+    assert replay.status == "succeeded"
+    assert replay.id != run.id
+    assert executor.seen_source_bytes == [
+        service.read_artifact(run.input_artifacts[0].sha256),
+        service.read_artifact(run.input_artifacts[0].sha256),
+    ]
+
+
+def test_isotropic_fem_rejects_noncanonical_request_and_generic_parameters(tmp_path):
+    service = RunService(tmp_path, executor=_FakeStageExecutor())
+    request_submission = _fem_submission()
+    input_data = request_submission.input_file.model_dump()
+    original_bytes = base64.b64decode(input_data["content_base64"])
+    noncanonical = original_bytes + b" "
+    input_data["sha256"] = hashlib.sha256(noncanonical).hexdigest()
+    input_data["content_base64"] = base64.b64encode(noncanonical).decode("ascii")
+
+    with pytest.raises(ValueError, match="canonical JSON"):
+        service.submit(
+            RunSubmission(
+                operation="fdm-l2-isotropic",
+                input_file=input_data,
+                parameters={},
+                upstream_run_ids=(),
+            )
+        )
+    with pytest.raises(ValueError, match="sealed in request.json"):
+        service.submit(
+            request_submission.model_copy(update={"parameters": {"youngs_modulus": 2000}})
+        )
+
+
 def test_runner_rejects_uploaded_content_that_does_not_match_provenance(tmp_path):
     service = RunService(tmp_path, executor=_FakeStageExecutor())
     source = b"not the claimed input"
@@ -441,6 +530,8 @@ class _FakeStageExecutor:
         assert definition.stage_id == contract.stage_id
         source = inputs[contract.inputs[0].sha256]
         self.seen_source_bytes.append(source)
+        if contract.operation == "fdm-l2-isotropic":
+            return self._execute_fem(contract, contract_bytes, source)
         result = json.dumps(
             {"schema_version": 1, "run_id": contract.run_id, "result": {"source": source.decode()}},
             sort_keys=True,
@@ -448,44 +539,48 @@ class _FakeStageExecutor:
         now = datetime.now(timezone.utc)
         from fdm_strength.provenance import ProvenanceArtifact, StageProvenance
 
-        provenance = StageProvenance(
-            run_id=contract.run_id,
-            stage_id=contract.stage_id,
-            operation=contract.operation,
-            image_reference=contract.image_reference,
-            image_digest=contract.image_digest,
-            base_image_reference=contract.base_image_reference,
-            dependency_lock_sha256=contract.dependency_lock_sha256,
-            contract_sha256=hashlib.sha256(contract_bytes).hexdigest(),
-            entrypoint=contract.entrypoint,
-            inputs=tuple(
-                ProvenanceArtifact(
-                    name=item.name,
-                    sha256=item.sha256,
-                    size_bytes=item.size_bytes,
-                    media_type=item.media_type,
-                )
-                for item in contract.inputs
-            ),
-            outputs=(
-                ProvenanceArtifact(
-                    name="result.json",
-                    sha256=hashlib.sha256(result).hexdigest(),
-                    size_bytes=len(result),
-                    media_type="application/vnd.styrkeanalyse.experimental-reduction+json",
+        provenance = (
+            StageProvenance(
+                run_id=contract.run_id,
+                stage_id=contract.stage_id,
+                operation=contract.operation,
+                image_reference=contract.image_reference,
+                image_digest=contract.image_digest,
+                base_image_reference=contract.base_image_reference,
+                dependency_lock_sha256=contract.dependency_lock_sha256,
+                contract_sha256=hashlib.sha256(contract_bytes).hexdigest(),
+                entrypoint=contract.entrypoint,
+                inputs=tuple(
+                    ProvenanceArtifact(
+                        name=item.name,
+                        sha256=item.sha256,
+                        size_bytes=item.size_bytes,
+                        media_type=item.media_type,
+                    )
+                    for item in contract.inputs
                 ),
-            ),
-            git_commit=contract.git_commit,
-            git_dirty=contract.git_dirty,
-            mpi_ranks=contract.mpi_ranks,
-            omp_threads=contract.omp_threads,
-            openblas_threads=contract.openblas_threads,
-            cpu_count=contract.cpu_count,
-            memory_limit_bytes=contract.memory_limit_bytes,
-            started_at=now,
-            completed_at=now,
-            runtime_versions={"python": "3.12", "pydantic": "2.13.5"},
-        ).model_dump_json().encode()
+                outputs=(
+                    ProvenanceArtifact(
+                        name="result.json",
+                        sha256=hashlib.sha256(result).hexdigest(),
+                        size_bytes=len(result),
+                        media_type="application/vnd.styrkeanalyse.experimental-reduction+json",
+                    ),
+                ),
+                git_commit=contract.git_commit,
+                git_dirty=contract.git_dirty,
+                mpi_ranks=contract.mpi_ranks,
+                omp_threads=contract.omp_threads,
+                openblas_threads=contract.openblas_threads,
+                cpu_count=contract.cpu_count,
+                memory_limit_bytes=contract.memory_limit_bytes,
+                started_at=now,
+                completed_at=now,
+                runtime_versions={"python": "3.12", "pydantic": "2.13.5"},
+            )
+            .model_dump_json()
+            .encode()
+        )
         return StageExecution(
             success=True,
             outputs={"result.json": result, "provenance.json": provenance},
@@ -495,6 +590,195 @@ class _FakeStageExecutor:
             completed_at=now,
             error=None,
         )
+
+    def _execute_fem(self, contract, contract_bytes, source):
+        from datetime import datetime, timezone
+
+        from fdm_strength.fem_models import (
+            IsotropicTensileRequest,
+            analytical_tensile_response,
+            model_sha256,
+        )
+        from fdm_strength.provenance import ProvenanceArtifact, StageProvenance
+
+        request = IsotropicTensileRequest.model_validate_json(source)
+        analytical = analytical_tensile_response(request)
+        mesh = b"fake-gmsh-mesh"
+        xdmf = b"fake-xdmf-fields"
+        fields = b"fake-hdf5-fields"
+        runtime_versions = {"python": "3.12", "pydantic": "2.13.5", "dolfinx": "0.11.0.post0"}
+        media_types = {
+            "result.json": "application/vnd.styrkeanalyse.fem-result+json",
+            "mesh.msh": "application/vnd.gmsh.msh",
+            "fields.xdmf": "application/vnd.xdmf+xml",
+            "fields.h5": "application/x-hdf5",
+        }
+        artifacts = {"mesh.msh": mesh, "fields.xdmf": xdmf, "fields.h5": fields}
+        result = {
+            "schema_version": 1,
+            "run_id": contract.run_id,
+            "stage_id": contract.stage_id,
+            "specimen": request.specimen.model_dump(mode="json"),
+            "material": {
+                **request.material.model_dump(mode="json"),
+                "sha256": model_sha256(request.material),
+            },
+            "boundary_conditions": {
+                **request.boundary_conditions.model_dump(mode="json"),
+                "sha256": model_sha256(request.boundary_conditions),
+            },
+            "mesh": {
+                **request.mesh.model_dump(mode="json"),
+                "sha256": hashlib.sha256(mesh).hexdigest(),
+                "cell_count": 1,
+            },
+            "solver_metadata": {
+                "name": contract.solver_name,
+                "version": contract.solver_version,
+                "runtime_versions": runtime_versions,
+            },
+            "fields": {
+                "displacement": "fields.xdmf:/displacement_mm",
+                "cauchy_stress": "fields.xdmf:/cauchy_stress_mpa",
+                "von_mises_stress": "fields.xdmf:/von_mises_stress_mpa",
+            },
+            "verification_status": "not_assessed",
+            "artifacts": {
+                name: {
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "size_bytes": len(content),
+                    "media_type": media_types[name],
+                }
+                for name, content in artifacts.items()
+            },
+            "result": {
+                "reaction_force_n": analytical.reaction_force_n,
+                "imposed_force_n": analytical.reaction_force_n,
+                "measured_axial_displacement_mm": analytical.axial_displacement_mm,
+                "nominal_stress_mpa": analytical.nominal_stress_mpa,
+                "nominal_strain": analytical.nominal_strain,
+                "volume_average_axial_stress_mpa": analytical.nominal_stress_mpa,
+                "peak_von_mises_stress_mpa": analytical.nominal_stress_mpa,
+                "axial_stress_uniformity_relative_range": 0.0,
+                "strain_energy_n_mm": 1.0,
+            },
+        }
+        result_bytes = json.dumps(result, sort_keys=True, separators=(",", ":")).encode()
+        outputs = {"result.json": result_bytes, **artifacts}
+        now = datetime.now(timezone.utc)
+        provenance = (
+            StageProvenance(
+                run_id=contract.run_id,
+                stage_id=contract.stage_id,
+                operation=contract.operation,
+                image_reference=contract.image_reference,
+                image_digest=contract.image_digest,
+                base_image_reference=contract.base_image_reference,
+                dependency_lock_sha256=contract.dependency_lock_sha256,
+                contract_sha256=hashlib.sha256(contract_bytes).hexdigest(),
+                entrypoint=contract.entrypoint,
+                inputs=tuple(
+                    ProvenanceArtifact(
+                        name=item.name,
+                        sha256=item.sha256,
+                        size_bytes=item.size_bytes,
+                        media_type=item.media_type,
+                    )
+                    for item in contract.inputs
+                ),
+                outputs=tuple(
+                    ProvenanceArtifact(
+                        name=name,
+                        sha256=hashlib.sha256(content).hexdigest(),
+                        size_bytes=len(content),
+                        media_type=media_types[name],
+                    )
+                    for name, content in sorted(outputs.items())
+                ),
+                git_commit=contract.git_commit,
+                git_dirty=contract.git_dirty,
+                solver_name=contract.solver_name,
+                solver_version=contract.solver_version,
+                mesh_sha256=hashlib.sha256(mesh).hexdigest(),
+                mesh_parameters=contract.mesh_parameters,
+                material_profile_id=contract.material_profile_id,
+                material_profile_sha256=contract.material_profile_sha256,
+                boundary_condition_set_id=contract.boundary_condition_set_id,
+                boundary_condition_set_sha256=contract.boundary_condition_set_sha256,
+                mpi_ranks=contract.mpi_ranks,
+                omp_threads=contract.omp_threads,
+                openblas_threads=contract.openblas_threads,
+                cpu_count=contract.cpu_count,
+                memory_limit_bytes=contract.memory_limit_bytes,
+                started_at=now,
+                completed_at=now,
+                runtime_versions=runtime_versions,
+            )
+            .model_dump_json()
+            .encode()
+        )
+        outputs["provenance.json"] = provenance
+        return StageExecution(
+            success=True,
+            outputs=outputs,
+            stdout=b"fake FEM stage completed",
+            stderr=b"",
+            started_at=now,
+            completed_at=now,
+            error=None,
+        )
+
+
+def _fem_submission():
+    from fdm_strength.fem_models import (
+        BoundaryConditionSet,
+        GmshMeshSettings,
+        IsotropicMaterialProfile,
+        IsotropicTensileRequest,
+        RectangularTensileSpecimen,
+        TensileLoad,
+        canonical_json_bytes,
+    )
+
+    request = IsotropicTensileRequest(
+        specimen=RectangularTensileSpecimen(
+            specimen_id="SYN-T01", length_mm=50.0, width_mm=10.0, thickness_mm=2.0
+        ),
+        material=IsotropicMaterialProfile(
+            profile_id="PLA-isotropic-v1", youngs_modulus_mpa=2000.0, poissons_ratio=0.35
+        ),
+        load=TensileLoad(force_n=100.0),
+        boundary_conditions=BoundaryConditionSet(set_id="axial-pull-v1"),
+        mesh=GmshMeshSettings(max_cell_size_mm=2.5, element_order=2),
+    )
+    content = canonical_json_bytes(request)
+    return RunSubmission(
+        operation="fdm-l2-isotropic",
+        input_file={
+            "filename": "request.json",
+            "media_type": "application/vnd.styrkeanalyse.fem-request+json",
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "content_base64": base64.b64encode(content).decode("ascii"),
+        },
+        parameters={},
+        upstream_run_ids=(),
+    )
+
+
+def _wait_for_service_job(service, job_id):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            job = service.read_job(job_id)
+        except (OSError, ValueError):
+            # Windows can briefly deny reads while the atomic job-file replace completes.
+            time.sleep(0.01)
+            continue
+        if job.status in {"succeeded", "failed"}:
+            assert job.status == "succeeded", job.error
+            return job
+        time.sleep(0.01)
+    raise AssertionError(f"job {job_id} did not finish")
 
 
 def _sample_run() -> Run:

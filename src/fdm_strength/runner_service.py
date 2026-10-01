@@ -6,6 +6,7 @@ import base64
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import socket
@@ -20,6 +21,11 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from fdm_strength.fem_models import (
+    IsotropicTensileRequest,
+    canonical_json_bytes,
+    model_sha256,
+)
 from fdm_strength.provenance import StageProvenance
 from fdm_strength.run_jobs import JobStore, RunJob
 from fdm_strength.run_models import ArtifactReference, Run, StageRecord
@@ -34,6 +40,13 @@ from fdm_strength.study_models import StudyWorkspaceV3, migrate_workspace_v2_to_
 
 MAX_INPUT_BYTES = 24 * 1024 * 1024
 DOCKER_API_TIMEOUT_SECONDS = 30
+ISOTROPIC_FEM_OPERATION = "fdm-l2-isotropic"
+_ISOTROPIC_FEM_MEDIA_TYPES = {
+    "result.json": "application/vnd.styrkeanalyse.fem-result+json",
+    "mesh.msh": "application/vnd.gmsh.msh",
+    "fields.xdmf": "application/vnd.xdmf+xml",
+    "fields.h5": "application/x-hdf5",
+}
 
 
 class RunInputFile(BaseModel):
@@ -187,9 +200,7 @@ class DockerStageExecutor:
                         "rw,noexec,nosuid,nodev,"
                         f"size={definition.work_size_bytes},uid=10001,gid=10001,mode=0770"
                     ),
-                    "/tmp": (
-                        "rw,exec,nosuid,nodev,size=268435456,uid=10001,gid=10001,mode=0700"
-                    ),
+                    "/tmp": ("rw,exec,nosuid,nodev,size=268435456,uid=10001,gid=10001,mode=0700"),
                 },
             )
             container.start()
@@ -419,6 +430,18 @@ class RunService:
         definition = stage_for_operation(submission.operation)
         _validate_input_media_type(submission.operation, submission.input_file.media_type)
         parameters = _json_object(submission.parameters, "parameters")
+        fem_request = None
+        if submission.operation == ISOTROPIC_FEM_OPERATION:
+            if parameters:
+                raise ValueError("all isotropic FEM inputs must be sealed in request.json")
+            if submission.upstream_run_ids:
+                raise ValueError("isotropic FEM requests cannot depend on upstream Runs")
+            try:
+                fem_request = IsotropicTensileRequest.model_validate_json(input_bytes)
+            except (UnicodeDecodeError, ValidationError, ValueError) as error:
+                raise ValueError(f"invalid isotropic FEM request: {error}") from error
+            if canonical_json_bytes(fem_request) != input_bytes:
+                raise ValueError("isotropic FEM request.json must use canonical JSON encoding")
         upstream_runs = self._resolve_upstream_runs(submission, input_bytes)
 
         run_id = str(uuid.uuid4())
@@ -426,7 +449,7 @@ class RunService:
             input_bytes,
             media_type=submission.input_file.media_type,
         )
-        source_name = "source.csv" if submission.operation == "tensile" else "workspace.json"
+        source_name = _source_input_name(submission.operation)
         stage_inputs: list[StageInput] = [
             StageInput(
                 name=source_name,
@@ -455,7 +478,11 @@ class RunService:
             direct_inputs.append(upstream_manifest_artifact)
             input_payloads[upstream_manifest_artifact.sha256] = upstream_manifest_bytes
 
-        stage_parameters = {**parameters, "_source_filename": submission.input_file.filename}
+        stage_parameters = (
+            {}
+            if fem_request is not None
+            else {**parameters, "_source_filename": submission.input_file.filename}
+        )
         direct_input_tuple = tuple(direct_inputs)
         run_inputs = _unique_artifacts(
             (
@@ -521,6 +548,19 @@ class RunService:
             inputs=tuple(stage_inputs),
             parameters=stage_parameters,
             expected_outputs=definition.expected_outputs,
+            **(
+                {
+                    "solver_name": "DOLFINx",
+                    "solver_version": "0.11.0.post0",
+                    "mesh_parameters": fem_request.mesh.model_dump(mode="json"),
+                    "material_profile_id": fem_request.material.profile_id,
+                    "material_profile_sha256": model_sha256(fem_request.material),
+                    "boundary_condition_set_id": fem_request.boundary_conditions.set_id,
+                    "boundary_condition_set_sha256": model_sha256(fem_request.boundary_conditions),
+                }
+                if fem_request is not None
+                else {}
+            ),
         )
         contract_bytes = canonical_contract_bytes(contract)
         spec_artifact = self.artifacts.put_bytes(
@@ -536,7 +576,6 @@ class RunService:
         )
         outputs: list[ArtifactReference] = []
         result_artifact: ArtifactReference | None = None
-        provenance_artifact: ArtifactReference | None = None
         result_value: dict[str, Any] | None = None
         if execution.success:
             output_bytes = execution.outputs.get("result.json")
@@ -567,9 +606,15 @@ class RunService:
                         }
                         for item in contract.inputs
                     ]
-                    output_media_types = {
-                        "result.json": "application/vnd.styrkeanalyse.experimental-reduction+json"
-                    }
+                    output_media_types = (
+                        _ISOTROPIC_FEM_MEDIA_TYPES
+                        if submission.operation == ISOTROPIC_FEM_OPERATION
+                        else {
+                            "result.json": (
+                                "application/vnd.styrkeanalyse.experimental-reduction+json"
+                            )
+                        }
+                    )
                     expected_manifest_outputs = [
                         {
                             "name": name,
@@ -594,7 +639,10 @@ class RunService:
                         or stage_provenance.git_dirty != contract.git_dirty
                         or stage_provenance.solver_name != contract.solver_name
                         or stage_provenance.solver_version != contract.solver_version
-                        or stage_provenance.mesh_sha256 != contract.mesh_sha256
+                        or (
+                            contract.mesh_sha256 is not None
+                            and stage_provenance.mesh_sha256 != contract.mesh_sha256
+                        )
                         or stage_provenance.mesh_parameters != contract.mesh_parameters
                         or stage_provenance.material_profile_id != contract.material_profile_id
                         or stage_provenance.material_profile_sha256
@@ -612,9 +660,7 @@ class RunService:
                         != expected_inputs
                         or [item.model_dump(mode="json") for item in stage_provenance.outputs]
                         != expected_manifest_outputs
-                        or not {"python", "pydantic"}.issubset(
-                            stage_provenance.runtime_versions
-                        )
+                        or not {"python", "pydantic"}.issubset(stage_provenance.runtime_versions)
                         or not (
                             execution.started_at
                             <= stage_provenance.started_at
@@ -626,6 +672,14 @@ class RunService:
                             "stage provenance does not match its immutable contract, image, "
                             "or artifacts"
                         )
+                    if submission.operation == ISOTROPIC_FEM_OPERATION:
+                        _validate_isotropic_fem_outputs(
+                            result_payload,
+                            fem_request,
+                            contract,
+                            execution.outputs,
+                            stage_provenance,
+                        )
                 except (
                     UnicodeDecodeError,
                     json.JSONDecodeError,
@@ -634,16 +688,27 @@ class RunService:
                 ) as error:
                     execution = _replace_execution_failure(execution, str(error))
                 else:
-                    result_artifact = self.artifacts.put_bytes(
-                        output_bytes,
-                        media_type="application/vnd.styrkeanalyse.experimental-reduction+json",
+                    output_artifacts: dict[str, ArtifactReference] = {}
+                    for name, content in execution.outputs.items():
+                        media_type = (
+                            _ISOTROPIC_FEM_MEDIA_TYPES[name]
+                            if submission.operation == ISOTROPIC_FEM_OPERATION
+                            and name in _ISOTROPIC_FEM_MEDIA_TYPES
+                            else "application/vnd.styrkeanalyse.stage-provenance+json"
+                            if name == "provenance.json"
+                            else "application/vnd.styrkeanalyse.experimental-reduction+json"
+                        )
+                        output_artifacts[name] = self.artifacts.put_bytes(
+                            content,
+                            media_type=media_type,
+                        )
+                    result_artifact = output_artifacts["result.json"]
+                    ordered_names = ["result.json"]
+                    ordered_names.extend(
+                        sorted(set(output_artifacts) - {"result.json", "provenance.json"})
                     )
-                    provenance_artifact = self.artifacts.put_bytes(
-                        provenance_bytes,
-                        media_type="application/vnd.styrkeanalyse.stage-provenance+json",
-                    )
-                    outputs.append(result_artifact)
-                    outputs.append(provenance_artifact)
+                    ordered_names.append("provenance.json")
+                    outputs.extend(output_artifacts[name] for name in ordered_names)
                     result_value = result_payload["result"]
 
         logs = _logs_bytes(execution.stdout, execution.stderr)
@@ -663,11 +728,7 @@ class RunService:
             dependency_lock_sha256=contract.dependency_lock_sha256,
             command=definition.command,
             input_artifacts=(spec_artifact, *direct_input_tuple),
-            output_artifacts=tuple(
-                artifact
-                for artifact in (result_artifact, provenance_artifact)
-                if artifact is not None
-            ),
+            output_artifacts=tuple(artifact for artifact in outputs if artifact != log_artifact),
             started_at=execution.started_at,
             completed_at=execution.completed_at,
             duration_ms=max(
@@ -710,7 +771,7 @@ class RunService:
             raise ValueError(f"saved Run {run_id} has an unreadable stage contract") from error
         if contract.run_id != original.id:
             raise ValueError("saved Run stage contract does not match its immutable record")
-        source_name = "source.csv" if contract.operation == "tensile" else "workspace.json"
+        source_name = _source_input_name(contract.operation)
         input_info = next((item for item in contract.inputs if item.name == source_name), None)
         if input_info is None:
             raise ValueError("saved Run stage contract has no replayable source input")
@@ -730,8 +791,7 @@ class RunService:
         )
         return self.submit(
             replay_submission,
-            image_reference=original.stages[0].image_reference
-            or original.stages[0].image_digest,
+            image_reference=original.stages[0].image_reference or original.stages[0].image_digest,
         )
 
     def read_run(self, run_id: str) -> Run:
@@ -760,9 +820,7 @@ class RunService:
                 raise ValueError(f"upstream Run {parent.id} result envelope is invalid")
             specimen_reduction = payload["result"].get("specimen_reduction")
             if not isinstance(specimen_reduction, dict):
-                raise ValueError(
-                    f"upstream Run {parent.id} result omitted specimen_reduction"
-                )
+                raise ValueError(f"upstream Run {parent.id} result omitted specimen_reduction")
             runs[parent.id] = {
                 "result_artifact_sha256": parent.result_artifact.sha256,
                 "specimen_reduction": specimen_reduction,
@@ -818,7 +876,7 @@ class RunService:
             if linked_run_ids != set(submission.upstream_run_ids):
                 raise ValueError("campaign upstream runs must match its linked specimen Runs")
         elif submission.upstream_run_ids:
-            raise ValueError("tensile Runs cannot depend on upstream Runs")
+            raise ValueError(f"{submission.operation} Runs cannot depend on upstream Runs")
 
         resolved: list[Run] = []
         for upstream_id in submission.upstream_run_ids:
@@ -927,9 +985,10 @@ def _validate_formal_image(image: StageImage) -> None:
         or re.search(r"@sha256:[0-9a-f]{64}$", image.base_image_reference) is None
     ):
         raise ValueError("formal stage image must record a digest-pinned base image")
-    if not isinstance(image.dependency_lock_sha256, str) or re.fullmatch(
-        r"[0-9a-f]{64}", image.dependency_lock_sha256
-    ) is None:
+    if (
+        not isinstance(image.dependency_lock_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", image.dependency_lock_sha256) is None
+    ):
         raise ValueError("formal stage image must record a dependency-lock hash")
 
 
@@ -953,6 +1012,128 @@ def _validate_input_media_type(operation: str, media_type: str) -> None:
         "application/vnd.styrkeanalyse.study+json",
     }:
         raise ValueError("campaign input must be a JSON study workspace")
+    if operation == ISOTROPIC_FEM_OPERATION and media_type != (
+        "application/vnd.styrkeanalyse.fem-request+json"
+    ):
+        raise ValueError("fdm-l2-isotropic input must be a canonical FEM request JSON file")
+
+
+def _source_input_name(operation: str) -> str:
+    if operation == "tensile":
+        return "source.csv"
+    if operation == ISOTROPIC_FEM_OPERATION:
+        return "request.json"
+    return "workspace.json"
+
+
+def _validate_isotropic_fem_outputs(
+    result_payload: dict[str, Any],
+    request: IsotropicTensileRequest | None,
+    contract: StageContract,
+    outputs: dict[str, bytes],
+    provenance: StageProvenance,
+) -> None:
+    if request is None:
+        raise ValueError("isotropic FEM request was not validated by the runner")
+    if result_payload.get("stage_id") != ISOTROPIC_FEM_OPERATION:
+        raise ValueError("isotropic FEM result has an unexpected stage identity")
+    if result_payload.get("specimen") != request.specimen.model_dump(mode="json"):
+        raise ValueError("isotropic FEM result specimen does not match request.json")
+
+    material = result_payload.get("material")
+    if (
+        not isinstance(material, dict)
+        or any(
+            material.get(key) != value
+            for key, value in request.material.model_dump(mode="json").items()
+        )
+        or material.get("sha256") != model_sha256(request.material)
+    ):
+        raise ValueError("isotropic FEM result material does not match request.json")
+
+    boundary_conditions = result_payload.get("boundary_conditions")
+    if (
+        not isinstance(boundary_conditions, dict)
+        or any(
+            boundary_conditions.get(key) != value
+            for key, value in request.boundary_conditions.model_dump(mode="json").items()
+        )
+        or boundary_conditions.get("sha256") != model_sha256(request.boundary_conditions)
+    ):
+        raise ValueError("isotropic FEM result boundary conditions do not match request.json")
+
+    mesh = result_payload.get("mesh")
+    mesh_digest = hashlib.sha256(outputs["mesh.msh"]).hexdigest()
+    if (
+        not isinstance(mesh, dict)
+        or any(
+            mesh.get(key) != value for key, value in request.mesh.model_dump(mode="json").items()
+        )
+        or mesh.get("sha256") != mesh_digest
+        or not isinstance(mesh.get("cell_count"), int)
+        or mesh["cell_count"] <= 0
+    ):
+        raise ValueError("isotropic FEM result mesh metadata does not match mesh.msh")
+    if (
+        provenance.mesh_sha256 != mesh_digest
+        or provenance.mesh_parameters != request.mesh.model_dump(mode="json")
+        or contract.mesh_parameters != request.mesh.model_dump(mode="json")
+    ):
+        raise ValueError("isotropic FEM mesh provenance does not match the generated mesh")
+
+    solver = result_payload.get("solver_metadata")
+    if (
+        not isinstance(solver, dict)
+        or solver.get("name") != contract.solver_name
+        or solver.get("version") != contract.solver_version
+        or solver.get("runtime_versions") != provenance.runtime_versions
+        or provenance.runtime_versions.get("dolfinx") != contract.solver_version
+    ):
+        raise ValueError("isotropic FEM solver metadata does not match its contract")
+
+    fields = result_payload.get("fields")
+    expected_fields = {
+        "displacement": "fields.xdmf:/displacement_mm",
+        "cauchy_stress": "fields.xdmf:/cauchy_stress_mpa",
+        "von_mises_stress": "fields.xdmf:/von_mises_stress_mpa",
+    }
+    if fields != expected_fields:
+        raise ValueError("isotropic FEM result does not identify its field datasets")
+
+    artifact_manifest = result_payload.get("artifacts")
+    expected_artifact_names = {"mesh.msh", "fields.xdmf", "fields.h5"}
+    if not isinstance(artifact_manifest, dict) or set(artifact_manifest) != expected_artifact_names:
+        raise ValueError("isotropic FEM result has an incomplete field artifact manifest")
+    for name in sorted(expected_artifact_names):
+        record = artifact_manifest[name]
+        content = outputs[name]
+        if (
+            not isinstance(record, dict)
+            or record.get("sha256") != hashlib.sha256(content).hexdigest()
+            or record.get("size_bytes") != len(content)
+            or record.get("media_type") != _ISOTROPIC_FEM_MEDIA_TYPES[name]
+        ):
+            raise ValueError(f"isotropic FEM result manifest does not match {name}")
+
+    result = result_payload["result"]
+    required_scalar_results = (
+        "reaction_force_n",
+        "imposed_force_n",
+        "measured_axial_displacement_mm",
+        "nominal_stress_mpa",
+        "nominal_strain",
+        "volume_average_axial_stress_mpa",
+        "peak_von_mises_stress_mpa",
+        "axial_stress_uniformity_relative_range",
+        "strain_energy_n_mm",
+    )
+    if any(
+        isinstance(result.get(key), bool)
+        or not isinstance(result.get(key), (int, float))
+        or not math.isfinite(result[key])
+        for key in required_scalar_results
+    ):
+        raise ValueError("isotropic FEM result is missing finite scalar results")
 
 
 def _json_object(value: dict[str, Any], label: str) -> dict[str, Any]:

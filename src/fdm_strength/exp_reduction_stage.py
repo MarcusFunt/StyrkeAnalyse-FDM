@@ -32,9 +32,7 @@ def main() -> int:
             source = inputs.get("workspace.json")
             upstream_source = inputs.get("upstream-results.json")
             if source is None or upstream_source is None:
-                raise ValueError(
-                    "campaign stage requires workspace.json and upstream-results.json"
-                )
+                raise ValueError("campaign stage requires workspace.json and upstream-results.json")
             try:
                 payload = json.loads(source)
                 upstream_payload = json.loads(upstream_source)
@@ -57,9 +55,7 @@ def main() -> int:
                     or not isinstance(entry.get("specimen_reduction"), dict)
                 ):
                     raise ValueError("campaign upstream result manifest contains an invalid entry")
-                upstream_results[run_id] = {
-                    "specimen_reduction": entry["specimen_reduction"]
-                }
+                upstream_results[run_id] = {"specimen_reduction": entry["specimen_reduction"]}
             result = reduce_campaign_workspace(payload, upstream_results)
         else:  # pragma: no cover - the stage registry prevents this
             raise ValueError(f"unsupported experimental-reduction operation {contract.operation}")
@@ -124,6 +120,7 @@ def main() -> int:
                 material_profile_id=contract.material_profile_id,
                 material_profile_sha256=contract.material_profile_sha256,
                 boundary_condition_set_id=contract.boundary_condition_set_id,
+                boundary_condition_set_sha256=contract.boundary_condition_set_sha256,
                 mpi_ranks=contract.mpi_ranks,
                 omp_threads=contract.omp_threads,
                 openblas_threads=contract.openblas_threads,
