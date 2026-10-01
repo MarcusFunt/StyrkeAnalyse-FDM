@@ -1,4 +1,4 @@
-export type FemJobStatus = "idle" | "queued" | "running" | "succeeded" | "failed";
+export type FemJobStatus = "idle" | "preparing" | "queued" | "running" | "succeeded" | "failed";
 
 export interface FemFormValues {
   specimenId: string;

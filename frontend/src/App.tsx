@@ -239,6 +239,8 @@ export default function App() {
   const csvInput = useRef<HTMLInputElement>(null);
   const workspaceInput = useRef<HTMLInputElement>(null);
   const analysisInputFingerprintRef = useRef("");
+  const femSubmissionInFlightRef = useRef(false);
+  const femSubmissionGenerationRef = useRef(0);
   const currentAnalysisFingerprint = analysisInputFingerprint({
     rows,
     columns,
@@ -1034,34 +1036,46 @@ export default function App() {
   }
 
   async function submitFemSolve(request: IsotropicTensileRequest): Promise<void> {
+    if (femSubmissionInFlightRef.current) return;
+    femSubmissionInFlightRef.current = true;
+    const generation = ++femSubmissionGenerationRef.current;
     setFemError("");
     setFemRunId(null);
     setFemDetail(null);
     setFemDetailError("");
     setFemDetailLoading(false);
-    setFemStatus("idle");
+    setFemStatus("preparing");
     try {
       const submission = await createFemSubmission(request);
+      if (generation !== femSubmissionGenerationRef.current) return;
       const payload = await submitRunAndWait(
         submission,
         "Finite element solve failed. Check the specimen, material and mesh settings.",
         setFemStatus,
       );
+      if (generation !== femSubmissionGenerationRef.current) return;
       const runId = (payload.run as { id?: unknown } | undefined)?.id;
       if (typeof runId !== "string") throw new Error("The completed FEM job omitted its immutable Run ID.");
       setFemRunId(runId);
       setFemStatus("succeeded");
       setFemDetailLoading(true);
       try {
-        setFemDetail(await loadFemRun(runId));
+        const detail = await loadFemRun(runId);
+        if (generation === femSubmissionGenerationRef.current) setFemDetail(detail);
       } catch (error) {
-        setFemDetailError(error instanceof Error ? error.message : "The FEM Run succeeded, but its inspection artifacts could not be loaded.");
+        if (generation === femSubmissionGenerationRef.current) {
+          setFemDetailError(error instanceof Error ? error.message : "The FEM Run succeeded, but its inspection artifacts could not be loaded.");
+        }
       } finally {
-        setFemDetailLoading(false);
+        if (generation === femSubmissionGenerationRef.current) setFemDetailLoading(false);
       }
     } catch (error) {
-      setFemStatus("failed");
-      setFemError(error instanceof Error ? error.message : "Could not complete the FEM solve.");
+      if (generation === femSubmissionGenerationRef.current) {
+        setFemStatus("failed");
+        setFemError(error instanceof Error ? error.message : "Could not complete the FEM solve.");
+      }
+    } finally {
+      if (generation === femSubmissionGenerationRef.current) femSubmissionInFlightRef.current = false;
     }
   }
 

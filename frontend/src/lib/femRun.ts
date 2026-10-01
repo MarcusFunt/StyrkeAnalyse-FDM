@@ -101,7 +101,8 @@ export interface FemArtifactDownload {
 export interface FemRunDetailData {
   run: FemRunRecord;
   envelope: FemResultEnvelope;
-  preview: FemFieldPreview;
+  preview: FemFieldPreview | null;
+  previewError: string | null;
   provenance: FemRunProvenance;
   artifacts: FemArtifactDownload[];
 }
@@ -341,18 +342,18 @@ export async function loadFemRun(runId: string, fetcher: typeof fetch = fetch): 
     throw new Error("FEM result mesh metadata is invalid.");
   }
   const manifest = requireRecord(envelope.artifacts, "FEM artifact manifest");
-  const expectedNames = ["field-preview.json", "fields.h5", "fields.xdmf", "mesh.msh"].sort();
-  if (Object.keys(manifest).sort().join("\0") !== expectedNames.join("\0")) {
+  const coreNames = ["fields.h5", "fields.xdmf", "mesh.msh"].sort();
+  const manifestNames = Object.keys(manifest).sort();
+  if (
+    coreNames.some((name) => !manifestNames.includes(name)) ||
+    manifestNames.some((name) => ![...coreNames, "field-preview.json"].includes(name))
+  ) {
     throw new Error("FEM result artifact manifest is incomplete.");
   }
   const expectedByName: Record<string, { mediaType: string; label: string }> = {
     "mesh.msh": { mediaType: "application/vnd.gmsh.msh", label: "mesh" },
     "fields.xdmf": { mediaType: "application/vnd.xdmf+xml", label: "XDMF fields" },
     "fields.h5": { mediaType: "application/x-hdf5", label: "HDF5 fields" },
-    "field-preview.json": {
-      mediaType: FEM_PREVIEW_MEDIA_TYPE,
-      label: "declared immutable Run output field preview",
-    },
   };
   const downloads: FemArtifactDownload[] = [];
   for (const [name, expected] of Object.entries(expectedByName)) {
@@ -370,26 +371,48 @@ export async function loadFemRun(runId: string, fetcher: typeof fetch = fetch): 
   }
   const meshManifestReference = requireArtifactReference(manifest["mesh.msh"], "mesh.msh");
   if (meshManifestReference.sha256 !== mesh.sha256) throw new Error("FEM mesh digest does not match mesh.msh.");
-  const previewManifestReference = requireArtifactReference(manifest["field-preview.json"], "field-preview.json");
-  const previewReference = requireUniqueArtifact(
-    runOutputs,
-    FEM_PREVIEW_MEDIA_TYPE,
-    "declared immutable Run output field preview",
-  );
-  const stagePreviewReference = requireUniqueArtifact(
-    stageOutputs,
-    FEM_PREVIEW_MEDIA_TYPE,
-    "declared immutable stage output field preview",
-  );
-  if (
-    previewReference.sha256 !== previewManifestReference.sha256 ||
-    previewReference.size_bytes !== previewManifestReference.size_bytes ||
-    stagePreviewReference.sha256 !== previewReference.sha256
-  ) {
-    throw new Error("FEM field preview is not bound to the declared immutable Run output.");
+  let preview: FemFieldPreview | null = null;
+  let previewError: string | null = "Field preview is unavailable for this Run.";
+  const expectedNames = [...coreNames];
+  if (Object.hasOwn(manifest, "field-preview.json")) {
+    try {
+      const previewManifestReference = requireArtifactReference(manifest["field-preview.json"], "field-preview.json");
+      if (previewManifestReference.media_type !== FEM_PREVIEW_MEDIA_TYPE) {
+        throw new Error("field-preview.json has the wrong media type.");
+      }
+      const previewReference = requireUniqueArtifact(
+        runOutputs,
+        FEM_PREVIEW_MEDIA_TYPE,
+        "declared immutable Run output field preview",
+      );
+      const stagePreviewReference = requireUniqueArtifact(
+        stageOutputs,
+        FEM_PREVIEW_MEDIA_TYPE,
+        "declared immutable stage output field preview",
+      );
+      if (
+        previewReference.sha256 !== previewManifestReference.sha256 ||
+        previewReference.size_bytes !== previewManifestReference.size_bytes ||
+        previewReference.media_type !== previewManifestReference.media_type ||
+        stagePreviewReference.sha256 !== previewReference.sha256 ||
+        stagePreviewReference.size_bytes !== previewReference.size_bytes
+      ) {
+        throw new Error("FEM field preview is not bound to the declared immutable Run output.");
+      }
+      downloads.push({ name: "field-preview.json", ...previewManifestReference });
+      expectedNames.push("field-preview.json");
+      const previewBytes = await artifactBytes(
+        fetcher,
+        previewReference,
+        MAX_FEM_PREVIEW_BYTES,
+        "FEM field preview",
+      );
+      preview = parseFemFieldPreview(previewBytes, mesh.sha256, Number(cellCount));
+      previewError = null;
+    } catch (error) {
+      previewError = error instanceof Error ? error.message : "The FEM field preview is unavailable.";
+    }
   }
-  const previewBytes = await artifactBytes(fetcher, previewReference, MAX_FEM_PREVIEW_BYTES, "FEM field preview");
-  const preview = parseFemFieldPreview(previewBytes, mesh.sha256, Number(cellCount));
 
   const provenanceReference = requireUniqueArtifact(runOutputs, PROVENANCE_MEDIA_TYPE, "provenance");
   const stageProvenanceReference = requireUniqueArtifact(stageOutputs, PROVENANCE_MEDIA_TYPE, "provenance");
@@ -424,6 +447,7 @@ export async function loadFemRun(runId: string, fetcher: typeof fetch = fetch): 
     run: typedRun,
     envelope: envelope as unknown as FemResultEnvelope,
     preview,
+    previewError,
     provenance,
     artifacts: [
       ...downloads,

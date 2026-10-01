@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { RotateCcw, RotateCw } from "lucide-react";
 import type { FemFieldPreview } from "./lib/femRun";
+import { isNumericallyUniform, orderSurfaceTrianglesByDepth } from "./lib/femViewer";
 
 type FieldKey = "von_mises_stress_mpa" | "axial_stress_mpa" | "axial_displacement_mm";
 
@@ -15,7 +16,29 @@ interface Point2D {
   y: number;
 }
 
-export default function FemFieldViewer({ preview }: { preview: FemFieldPreview }) {
+export default function FemFieldViewer({
+  preview,
+  unavailableReason,
+}: {
+  preview: FemFieldPreview | null;
+  unavailableReason: string | null;
+}) {
+  if (!preview) return <UnavailablePreview reason={unavailableReason} />;
+  return <AvailableFieldViewer preview={preview} />;
+}
+
+function UnavailablePreview({ reason }: { reason: string | null }) {
+  return (
+    <section className="panel fem-viewer" aria-labelledby="fem-viewer-title">
+      <div className="section-eyebrow">SOLVER FIELD</div>
+      <h2 id="fem-viewer-title">Field preview unavailable</h2>
+      <p role="status">{reason ?? "The solver did not provide a field preview."}</p>
+      <p>Scalar results, provenance, and exact mesh and full-field downloads remain available below.</p>
+    </section>
+  );
+}
+
+function AvailableFieldViewer({ preview }: { preview: FemFieldPreview }) {
   const [field, setField] = useState<FieldKey>("von_mises_stress_mpa");
   const [yaw, setYaw] = useState(-35);
   const [showEdges, setShowEdges] = useState(true);
@@ -24,6 +47,7 @@ export default function FemFieldViewer({ preview }: { preview: FemFieldPreview }
   const minimum = Math.min(...values);
   const maximum = Math.max(...values);
   const range = maximum - minimum;
+  const uniform = isNumericallyUniform(minimum, maximum);
 
   const polygons = useMemo(() => {
     const angle = (yaw * Math.PI) / 180;
@@ -43,15 +67,17 @@ export default function FemFieldViewer({ preview }: { preview: FemFieldPreview }
     const scale = Math.min(540 / Math.max(maxX - minX, 1e-9), 350 / Math.max(maxY - minY, 1e-9));
     const offsetX = 300 - ((minX + maxX) / 2) * scale;
     const offsetY = 205 - ((minY + maxY) / 2) * scale;
-    return projected.map((points, index) => ({
+    const polygons = projected.map((points, index) => ({
       points: points.map((point) => `${(point.x * scale + offsetX).toFixed(2)},${(point.y * scale + offsetY).toFixed(2)}`).join(" "),
       value: values[index],
       index,
     }));
+    const depthOrder = orderSurfaceTrianglesByDepth(preview, yaw);
+    return depthOrder.map((index) => polygons[index]);
   }, [preview, values, yaw]);
 
   function color(value: number): string {
-    const fraction = range <= Number.EPSILON ? 0.5 : Math.max(0, Math.min(1, (value - minimum) / range));
+    const fraction = uniform ? 0.5 : Math.max(0, Math.min(1, (value - minimum) / range));
     if (field === "axial_stress_mpa") {
       if (fraction < 0.5) {
         const t = fraction * 2;

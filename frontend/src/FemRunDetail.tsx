@@ -64,7 +64,7 @@ export default function FemRunDetail({ detail }: { detail: FemRunDetailData }) {
         })}
       </section>
 
-      <FemFieldViewer preview={detail.preview} />
+      <FemFieldViewer preview={detail.preview} unavailableReason={detail.previewError} />
 
       <section className="panel fem-artifacts-panel">
         <div className="panel-heading"><div><div className="section-eyebrow">CONTENT ADDRESSED OUTPUTS</div><h2>Mesh, fields and provenance files</h2><p>Each link retrieves the exact bytes identified by the immutable SHA-256 digest.</p></div><FileBox size={18} /></div>

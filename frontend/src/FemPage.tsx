@@ -36,6 +36,7 @@ interface FemPageProps {
 
 const statusText: Record<FemJobStatus, string> = {
   idle: "Ready to submit",
+  preparing: "Preparing solve",
   queued: "Queued",
   running: "Solver running",
   succeeded: "Run succeeded",
@@ -45,7 +46,10 @@ const statusText: Record<FemJobStatus, string> = {
 export default function FemPage(props: FemPageProps) {
   const [values, setValues] = useState(initialValues);
   const [formError, setFormError] = useState("");
-  const busy = props.status === "queued" || props.status === "running";
+  const busy = props.status === "preparing" || props.status === "queued" || props.status === "running" || props.loadingDetail;
+  const submitLabel = props.status === "preparing"
+    ? "Preparing solve…"
+    : props.loadingDetail ? "Loading results…" : "Submit FEM solve";
 
   function set<K extends keyof FemFormValues>(key: K, value: FemFormValues[K]): void {
     setValues((current) => ({ ...current, [key]: value }));
@@ -126,7 +130,7 @@ export default function FemPage(props: FemPageProps) {
             <span>Gmsh mesh · DOLFINx elasticity · isolated runner</span>
             <button className="button button-primary" type="submit" disabled={busy || !props.apiReady}>
               {busy ? <LoaderCircle className="fem-spinner" size={16} /> : <Play size={15} />}
-              {busy ? "Solve in progress…" : "Submit FEM solve"}
+              {submitLabel}
             </button>
           </div>
         </form>

@@ -228,3 +228,65 @@ test("show the runner error when FEM submission fails", async ({ page }) => {
   await expect(page.getByText("Run failed")).toBeVisible();
   await expectNoSeriousA11yViolations(page);
 });
+
+test("keeps rapid duplicate FEM submissions to one in-flight job", async ({ page }) => {
+  let submissionCount = 0;
+  await page.route("**/api/runs", async (route) => {
+    submissionCount += 1;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await route.fulfill({
+      status: 422,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "Simulated delayed FEM runner rejection." }),
+    });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Finite element models" }).click();
+  await page.locator(".fem-form").evaluate((form: HTMLFormElement) => {
+    form.requestSubmit();
+    form.requestSubmit();
+  });
+
+  await expect(page.getByRole("button", { name: "Preparing solve…" })).toBeDisabled();
+  await expect(page.getByRole("alert").filter({ hasText: "Simulated delayed FEM runner rejection" })).toBeVisible();
+  await page.waitForTimeout(50);
+  expect(submissionCount).toBe(1);
+});
+
+test("shows scalar results and exact downloads when the field preview is corrupt", async ({ page }) => {
+  let previewDigest: string | null = null;
+  await page.route(/\/api\/runs\/[0-9a-f-]+$/, async (route) => {
+    const response = await route.fetch();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await route.fulfill({ response });
+  });
+  await page.route("**/api/artifacts/*", async (route) => {
+    const response = await route.fetch();
+    const digest = previewDigest;
+    if (digest && route.request().url().endsWith(digest)) {
+      await route.fulfill({ response, body: "corrupt preview bytes" });
+      return;
+    }
+    const content = await response.body();
+    try {
+      const envelope = JSON.parse(content.toString("utf8")) as {
+        artifacts?: { [name: string]: { sha256?: unknown } };
+      };
+      const hash = envelope.artifacts?.["field-preview.json"]?.sha256;
+      if (typeof hash === "string") previewDigest = hash;
+    } catch {
+      // Non-JSON mesh and field files pass through unchanged.
+    }
+    await route.fulfill({ response });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Finite element models" }).click();
+  await page.getByRole("button", { name: "Submit FEM solve" }).click();
+  await expect(page.getByText("Run succeeded")).toBeVisible({ timeout: 180_000 });
+  await expect(page.getByRole("button", { name: "Loading results…" })).toBeDisabled();
+  await expect(page.getByRole("heading", { name: "Field preview unavailable" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText("Reaction force", { exact: true })).toBeVisible();
+  for (const artifactName of ["mesh.msh", "fields.xdmf", "fields.h5", "field-preview.json", "provenance.json"]) {
+    await expect(page.getByRole("link", { name: new RegExp(artifactName.replaceAll(".", "\\.")) })).toBeVisible();
+  }
+});

@@ -46,6 +46,7 @@ async function makeFixture(options: {
   previewBytes?: Uint8Array;
   previewMeshDigest?: string;
   includePreviewOutput?: boolean;
+  includePreviewManifest?: boolean;
 } = {}): Promise<{ fetcher: typeof fetch; runData: FemRunDetailData; previewSha: string }> {
   const previewBytes = options.previewBytes ?? validPreview(options.previewMeshDigest);
   const previewSha = await sha256(previewBytes);
@@ -70,7 +71,7 @@ async function makeFixture(options: {
       { name: "mesh.msh" },
       { name: "fields.xdmf" },
       { name: "fields.h5" },
-      { name: "field-preview.json" },
+      ...(options.includePreviewOutput === false ? [] : [{ name: "field-preview.json" }]),
     ],
   }));
   const provenanceSha = await sha256(provenanceBytes);
@@ -107,7 +108,9 @@ async function makeFixture(options: {
       "mesh.msh": { sha256: meshDigest, size_bytes: 128, media_type: "application/vnd.gmsh.msh" },
       "fields.xdmf": { sha256: fieldsXdmfDigest, size_bytes: 256, media_type: "application/vnd.xdmf+xml" },
       "fields.h5": { sha256: fieldsHdf5Digest, size_bytes: 512, media_type: "application/x-hdf5" },
-      "field-preview.json": { sha256: previewSha, size_bytes: previewBytes.byteLength, media_type: previewMediaType },
+      ...(options.includePreviewManifest === false ? {} : {
+        "field-preview.json": { sha256: previewSha, size_bytes: previewBytes.byteLength, media_type: previewMediaType },
+      }),
     },
     result: {
       reaction_force_n: 100,
@@ -169,28 +172,50 @@ describe("FEM Run inspection", () => {
 
     expect(detail.run.id).toBe(runId);
     expect(detail.envelope.mesh.sha256).toBe(meshDigest);
-    expect(detail.preview.mesh_sha256).toBe(meshDigest);
-    expect(detail.preview.triangles[0].von_mises_stress_mpa).toBe(10);
+    expect(detail.preview?.mesh_sha256).toBe(meshDigest);
+    expect(detail.preview?.triangles[0].von_mises_stress_mpa).toBe(10);
     expect(detail.artifacts.map((artifact) => artifact.name)).toEqual([
       "mesh.msh", "fields.xdmf", "fields.h5", "field-preview.json", "provenance.json",
     ]);
     expect(detail.provenance.image_digest).toBe(`sha256:${"1".repeat(64)}`);
   });
 
-  it("test_parse_fem_run_rejects_missing_or_malformed_preview", async () => {
+  it("keeps results and declared downloads available when field preview is missing or malformed", async () => {
     const unlisted = await makeFixture({ includePreviewOutput: false });
-    await expect(loadFemRun(runId, unlisted.fetcher)).rejects.toThrow(/declared immutable Run output/i);
+    const missing = await loadFemRun(runId, unlisted.fetcher);
+    expect(missing.preview).toBeNull();
+    expect(missing.previewError).toMatch(/not bound|unavailable|declare exactly one/i);
+    expect(missing.envelope.result.reaction_force_n).toBe(100);
+    expect(missing.artifacts.map((artifact) => artifact.name)).toEqual([
+      "mesh.msh", "fields.xdmf", "fields.h5", "provenance.json",
+    ]);
 
     const malformed = await makeFixture({ previewBytes: new TextEncoder().encode("not JSON") });
-    await expect(loadFemRun(runId, malformed.fetcher)).rejects.toThrow(/valid JSON/i);
+    const invalid = await loadFemRun(runId, malformed.fetcher);
+    expect(invalid.preview).toBeNull();
+    expect(invalid.previewError).toMatch(/valid JSON/i);
+    expect(invalid.artifacts.map((artifact) => artifact.name)).toContain("field-preview.json");
 
     const wrongMesh = await makeFixture({ previewMeshDigest: "f".repeat(64) });
-    await expect(loadFemRun(runId, wrongMesh.fetcher)).rejects.toThrow(/mesh digest/i);
+    const mismatched = await loadFemRun(runId, wrongMesh.fetcher);
+    expect(mismatched.preview).toBeNull();
+    expect(mismatched.previewError).toMatch(/mesh digest/i);
+    expect(mismatched.artifacts.map((artifact) => artifact.name)).toContain("mesh.msh");
+
+    const legacy = await makeFixture({ includePreviewOutput: false, includePreviewManifest: false });
+    const legacyDetail = await loadFemRun(runId, legacy.fetcher);
+    expect(legacyDetail.preview).toBeNull();
+    expect(legacyDetail.previewError).toMatch(/unavailable/i);
+    expect(legacyDetail.artifacts.map((artifact) => artifact.name)).toContain("fields.h5");
   });
 
-  it("test_parse_fem_run_rejects_preview_over_size_limit", async () => {
+  it("keeps the scalar result and exact artifact links when the preview exceeds the viewer limit", async () => {
     const oversized = await makeFixture({ previewBytes: new Uint8Array(MAX_FEM_PREVIEW_BYTES + 1) });
-    await expect(loadFemRun(runId, oversized.fetcher)).rejects.toThrow(/16 MiB/i);
+    const detail = await loadFemRun(runId, oversized.fetcher);
+    expect(detail.preview).toBeNull();
+    expect(detail.previewError).toMatch(/16 MiB/i);
+    expect(detail.envelope.result.nominal_stress_mpa).toBe(5);
+    expect(detail.artifacts.map((artifact) => artifact.name)).toContain("field-preview.json");
   });
 
   it("test_fem_run_detail_labels_run_gate_and_validation_separately", () => {

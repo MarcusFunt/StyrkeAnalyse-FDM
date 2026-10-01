@@ -308,6 +308,36 @@ def test_isotropic_fem_runs_as_a_persistent_job_and_replays_saved_request(tmp_pa
     ]
 
 
+def test_replay_of_pre_preview_fem_run_uses_saved_output_contract(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    import fdm_strength.runner_service as runner_service_module
+    from fdm_strength.stage_registry import stage_for_operation
+
+    current_lookup = runner_service_module.stage_for_operation
+    current_definition = stage_for_operation("fdm-l2-isotropic")
+    legacy_outputs = tuple(
+        name for name in current_definition.expected_outputs if name != "field-preview.json"
+    )
+    executor = _FakeStageExecutor()
+    service = RunService(tmp_path, executor=executor)
+
+    monkeypatch.setattr(
+        runner_service_module,
+        "stage_for_operation",
+        lambda operation: replace(current_lookup(operation), expected_outputs=legacy_outputs),
+    )
+    original, _ = service.submit(_fem_submission())
+    assert original.status == "succeeded"
+    assert "field-preview.json" not in executor.seen_contracts[0].expected_outputs
+
+    monkeypatch.undo()
+    replay, _ = service.replay(original.id)
+
+    assert replay.status == "succeeded"
+    assert executor.seen_contracts[1].expected_outputs == legacy_outputs
+
+
 def test_isotropic_fem_rejects_noncanonical_request_and_generic_parameters(tmp_path):
     service = RunService(tmp_path, executor=_FakeStageExecutor())
     request_submission = _fem_submission()
@@ -629,8 +659,9 @@ class _FakeStageExecutor:
             "mesh.msh": mesh,
             "fields.xdmf": xdmf,
             "fields.h5": fields,
-            "field-preview.json": field_preview,
         }
+        if "field-preview.json" in contract.expected_outputs:
+            artifacts["field-preview.json"] = field_preview
         result = {
             "schema_version": 1,
             "run_id": contract.run_id,

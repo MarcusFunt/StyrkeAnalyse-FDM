@@ -421,6 +421,7 @@ class RunService:
         submission: RunSubmission,
         *,
         image_reference: str | None = None,
+        replay_expected_outputs: tuple[str, ...] | None = None,
     ) -> tuple[Run, dict[str, Any] | None]:
         input_bytes = _decode_input(submission.input_file)
         computed_digest = hashlib.sha256(input_bytes).hexdigest()
@@ -429,6 +430,15 @@ class RunService:
         if len(input_bytes) > MAX_INPUT_BYTES:
             raise ValueError(f"input file exceeds {MAX_INPUT_BYTES // (1024 * 1024)} MB")
         definition = stage_for_operation(submission.operation)
+        expected_outputs = definition.expected_outputs
+        if replay_expected_outputs is not None:
+            accepted_replay_outputs = {
+                definition.expected_outputs,
+                *definition.replay_output_contracts,
+            }
+            if replay_expected_outputs not in accepted_replay_outputs:
+                raise ValueError("saved Run uses an unsupported stage output contract")
+            expected_outputs = replay_expected_outputs
         _validate_input_media_type(submission.operation, submission.input_file.media_type)
         parameters = _json_object(submission.parameters, "parameters")
         fem_request = None
@@ -507,7 +517,7 @@ class RunService:
                 operation=submission.operation,
                 inputs=tuple(stage_inputs),
                 parameters=stage_parameters,
-                expected_outputs=definition.expected_outputs,
+                expected_outputs=expected_outputs,
             )
             spec_artifact = self.artifacts.put_bytes(
                 canonical_contract_bytes(failed_contract),
@@ -548,7 +558,7 @@ class RunService:
             memory_limit_bytes=definition.memory_limit_bytes,
             inputs=tuple(stage_inputs),
             parameters=stage_parameters,
-            expected_outputs=definition.expected_outputs,
+            expected_outputs=expected_outputs,
             **(
                 {
                     "solver_name": "DOLFINx",
@@ -772,6 +782,21 @@ class RunService:
             raise ValueError(f"saved Run {run_id} has an unreadable stage contract") from error
         if contract.run_id != original.id:
             raise ValueError("saved Run stage contract does not match its immutable record")
+        original_stage = original.stages[0]
+        definition = stage_for_operation(contract.operation)
+        if (
+            contract.stage_id != original_stage.stage_id
+            or contract.operation != original_stage.operation
+            or contract.image_digest != original_stage.image_digest
+            or (
+                contract.image_reference is not None
+                and original_stage.image_reference is not None
+                and contract.image_reference != original_stage.image_reference
+            )
+            or contract.expected_outputs
+            not in {definition.expected_outputs, *definition.replay_output_contracts}
+        ):
+            raise ValueError("saved Run stage contract does not match its approved immutable stage")
         source_name = _source_input_name(contract.operation)
         input_info = next((item for item in contract.inputs if item.name == source_name), None)
         if input_info is None:
@@ -793,6 +818,7 @@ class RunService:
         return self.submit(
             replay_submission,
             image_reference=original.stages[0].image_reference or original.stages[0].image_digest,
+            replay_expected_outputs=contract.expected_outputs,
         )
 
     def read_run(self, run_id: str) -> Run:
@@ -1102,8 +1128,13 @@ def _validate_isotropic_fem_outputs(
         raise ValueError("isotropic FEM result does not identify its field datasets")
 
     artifact_manifest = result_payload.get("artifacts")
-    expected_artifact_names = {"mesh.msh", "fields.xdmf", "fields.h5"}
-    expected_artifact_names.add("field-preview.json")
+    expected_artifact_names = set(contract.expected_outputs) - {"result.json", "provenance.json"}
+    required_artifacts = {"mesh.msh", "fields.xdmf", "fields.h5"}
+    if frozenset(expected_artifact_names) not in {
+        frozenset(required_artifacts),
+        frozenset(required_artifacts | {"field-preview.json"}),
+    }:
+        raise ValueError("isotropic FEM contract has an unsupported artifact set")
     if not isinstance(artifact_manifest, dict) or set(artifact_manifest) != expected_artifact_names:
         raise ValueError("isotropic FEM result has an incomplete field artifact manifest")
     for name in sorted(expected_artifact_names):
@@ -1117,13 +1148,14 @@ def _validate_isotropic_fem_outputs(
         ):
             raise ValueError(f"isotropic FEM result manifest does not match {name}")
 
-    from fdm_strength.fem_preview import validate_surface_field_preview
+    if "field-preview.json" in expected_artifact_names:
+        from fdm_strength.fem_preview import validate_surface_field_preview
 
-    validate_surface_field_preview(
-        outputs["field-preview.json"],
-        mesh_sha256=mesh_digest,
-        cell_count=mesh["cell_count"],
-    )
+        validate_surface_field_preview(
+            outputs["field-preview.json"],
+            mesh_sha256=mesh_digest,
+            cell_count=mesh["cell_count"],
+        )
 
     result = result_payload["result"]
     required_scalar_results = (
