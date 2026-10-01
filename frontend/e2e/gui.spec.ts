@@ -196,14 +196,32 @@ test("submit a real FEM solve and inspect its mesh, fields, results and provenan
   await expect(page.getByText("Reaction force", { exact: true })).toBeVisible();
   await expect(page.getByText("Not assessed for this Run")).toBeVisible();
   await expect(page.getByText("Not validated against experiment")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Surface mesh and field preview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "3D mesh and field preview" })).toBeVisible();
+  const webglCanvas = page.locator("canvas.fem-webgl-canvas");
+  const projectionFallback = page.locator("svg.fem-mesh-svg");
+  await expect.poll(async () => (await webglCanvas.isVisible()) || (await projectionFallback.isVisible())).toBe(true);
+  await expect(page.locator(".fem-renderer-badge.webgl2, .fem-renderer-badge.fallback")).toBeVisible();
+  const browserSupportsWebgl2 = await page.evaluate(() => {
+    const context = document.createElement("canvas").getContext("webgl2");
+    const available = Boolean(context);
+    context?.getExtension("WEBGL_lose_context")?.loseContext();
+    return available;
+  });
+  if (browserSupportsWebgl2) {
+    await expect(webglCanvas).toBeVisible();
+    await expect(page.locator(".fem-renderer-badge.webgl2")).toBeVisible();
+    expect(await webglCanvas.evaluate((canvas: HTMLCanvasElement) => Boolean(canvas.getContext("webgl2")))).toBe(true);
+  } else {
+    await expect(projectionFallback).toBeVisible();
+    await expect(page.locator(".fem-renderer-badge.fallback")).toBeVisible();
+  }
   const fieldSelector = page.getByRole("combobox", { name: "Field to visualize" });
   await expect(fieldSelector).toBeVisible();
   await fieldSelector.selectOption("axial_displacement_mm");
-  await expect(page.getByRole("img", { name: /Axial displacement uₓ surface field/ })).toBeVisible();
+  await expect(page.getByRole("img", { name: /axial displacement/i })).toBeVisible();
   await page.getByRole("button", { name: "Rotate mesh right" }).click();
   await page.getByRole("checkbox", { name: "Show mesh edges" }).uncheck();
-  await expect(page.getByText(/surface approximation of element averages/)).toBeVisible();
+  await expect(page.getByText(/surface approximation of element averages/i)).toBeVisible();
 
   for (const artifactName of ["mesh.msh", "fields.xdmf", "fields.h5", "field-preview.json", "provenance.json"]) {
     const artifact = page.getByRole("link", { name: new RegExp(artifactName.replaceAll(".", "\\.")) });
