@@ -1,4 +1,5 @@
 .git
+.codex-remote-attachments/
 .github
 .devcontainer
 .venv
