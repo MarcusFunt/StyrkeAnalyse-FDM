@@ -1,5 +1,6 @@
 import hashlib
 
+import numpy as np
 import pytest
 from pydantic import ValidationError
 
@@ -18,6 +19,7 @@ from fdm_strength.fem_models import (
 from fdm_strength.isotropic_fem_stage import (
     EXPECTED_OUTPUTS,
     _collect_solver_artifacts,
+    _tetrahedron_corner_dofs,
     validate_stage_request,
 )
 from fdm_strength.stage_contract import StageContract, StageInput
@@ -217,6 +219,7 @@ def test_solver_artifact_collection_does_not_require_result_written_later(tmp_pa
     (tmp_path / "mesh.msh").write_bytes(b"mesh")
     (tmp_path / "fields.xdmf").write_bytes(b"xdmf")
     (tmp_path / "fields.h5").write_bytes(b"hdf5")
+    (tmp_path / "field-preview.json").write_bytes(b"preview")
 
     artifacts = _collect_solver_artifacts(tmp_path)
 
@@ -224,7 +227,21 @@ def test_solver_artifact_collection_does_not_require_result_written_later(tmp_pa
         "mesh.msh": b"mesh",
         "fields.xdmf": b"xdmf",
         "fields.h5": b"hdf5",
+        "field-preview.json": b"preview",
     }
+
+
+def test_tetrahedron_corner_dofs_uses_p1_and_p2_numpy_geometry_maps():
+    p1_geometry = np.asarray([[2, 5, 7, 11]], dtype=np.int32)
+    p2_geometry = np.asarray([[2, 5, 7, 11, 13, 17, 19, 23, 29, 31]], dtype=np.int32)
+
+    assert _tetrahedron_corner_dofs(p1_geometry).tolist() == [[2, 5, 7, 11]]
+    assert _tetrahedron_corner_dofs(p2_geometry).tolist() == [[2, 5, 7, 11]]
+
+
+def test_tetrahedron_corner_dofs_rejects_non_tetrahedral_geometry_maps():
+    with pytest.raises(ValueError, match="at least four geometry nodes per cell"):
+        _tetrahedron_corner_dofs(np.asarray([[0, 1, 2]], dtype=np.int32))
 
 
 def test_isotropic_fem_uses_a_server_registered_stage_definition():
@@ -238,5 +255,6 @@ def test_isotropic_fem_uses_a_server_registered_stage_definition():
         "mesh.msh",
         "fields.xdmf",
         "fields.h5",
+        "field-preview.json",
         "provenance.json",
     )

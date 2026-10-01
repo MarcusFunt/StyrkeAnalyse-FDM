@@ -111,6 +111,12 @@ def test_gui_service_stores_studies_and_is_loopback_only():
     assert 'CMD ["python", "-m", "fdm_strength.web"]' in dockerfile
 
 
+def test_runner_image_bakes_the_isotropic_preview_validator():
+    dockerfile = (ROOT / "docker/runner.Dockerfile").read_text()
+
+    assert "COPY src/fdm_strength/fem_preview.py /app/src/fdm_strength/fem_preview.py" in dockerfile
+
+
 def test_remote_desktop_instructions_use_tailnet_serve_without_exposing_other_ports():
     readme = (ROOT / "README.md").read_text()
     assert "tailscale serve --bg 8010" in readme

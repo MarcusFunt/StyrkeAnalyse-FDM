@@ -29,12 +29,14 @@ result. Status by roadmap milestone:
 | M6 fracture | The isotropic elastic `J ↔ K` conversion and a bilinear cohesive traction envelope are analytical helpers only. There is no domain-integral implementation, DCB calibration record, cohesive solver, phase-field model, or fracture validation. |
 | M7 G-code fields | The first data layer is implemented: `parse_toolpath(bytes)` hashes exact source bytes and emits immutable millimetre-based linear moves, extrusion, direction, raster angle, and deposition bounds. Curves and unsupported transforms fail explicitly. Specimen registration, mesh mapping, bead/porosity inference, local material fields, and FEM integration are not implemented. |
 
-The browser GUI has no FEM setup, job, field-visualization, or FEM-versus-experiment
-workflow today. It currently explores experimental tensile force-extension and
-stress-strain curves and reports campaign readiness. Any FEM-versus-experiment
-view must require the matching green M4 assessment; the five-specimen campaign
-readiness check is not a substitute for solver verification. The specimen
-workflow is currently tensile-only and records metadata for later test types.
+The browser GUI now has a focused FEM setup page for the supported rectangular
+isotropic tensile stage. It submits an asynchronous Run and, on success, shows
+scalar outputs, an interactive boundary-field preview, exact mesh/full-field
+downloads, and solver provenance. The page labels Run execution, M4 verification,
+and experimental validation separately: a successful Run is not a passing M4
+gate, and neither the FEM result nor five-specimen campaign readiness establishes
+experimental validation. The specimen workflow remains tensile-only and records
+metadata for later test types.
 
 For the existing open-source implementations behind most of these milestones —
 what each one contains, its licence, and a measured estimate of the work to

@@ -21,6 +21,7 @@ from fdm_strength.fem_models import (
     isotropic_lame_parameters,
     model_sha256,
 )
+from fdm_strength.fem_preview import build_surface_field_preview
 from fdm_strength.provenance import ProvenanceArtifact, StageProvenance
 from fdm_strength.stage_contract import StageContract, load_stage_contract, read_stage_outputs
 
@@ -32,15 +33,17 @@ EXPECTED_OUTPUTS = (
     "mesh.msh",
     "fields.xdmf",
     "fields.h5",
+    "field-preview.json",
     "provenance.json",
 )
-SOLVER_ARTIFACT_OUTPUTS = ("mesh.msh", "fields.xdmf", "fields.h5")
+SOLVER_ARTIFACT_OUTPUTS = ("mesh.msh", "fields.xdmf", "fields.h5", "field-preview.json")
 
 _OUTPUT_MEDIA_TYPES = {
     "result.json": "application/vnd.styrkeanalyse.fem-result+json",
     "mesh.msh": "application/vnd.gmsh.msh",
     "fields.xdmf": "application/vnd.xdmf+xml",
     "fields.h5": "application/x-hdf5",
+    "field-preview.json": "application/vnd.styrkeanalyse.fem-field-preview+json",
 }
 
 
@@ -59,6 +62,19 @@ def isotropic_cauchy_stress(
     lame_lambda, mu = isotropic_lame_parameters(youngs_modulus_mpa, poissons_ratio)
     epsilon = isotropic_strain(displacement, ufl)
     return lame_lambda * ufl.tr(epsilon) * ufl.Identity(3) + 2.0 * mu * epsilon
+
+
+def _tetrahedron_corner_dofs(geometry_dofmap: Any) -> Any:
+    """Return the four vertex geometry DOFs from DOLFINx's P1 or P2 cell map."""
+    import numpy as np
+
+    cell_dofs = np.asarray(geometry_dofmap)
+    if cell_dofs.ndim != 2 or cell_dofs.shape[1] < 4:
+        raise ValueError("tetrahedral geometry maps require at least four geometry nodes per cell")
+    corner_dofs = np.ascontiguousarray(cell_dofs[:, :4], dtype=np.int64)
+    if np.any(corner_dofs < 0) or np.any(np.diff(np.sort(corner_dofs, axis=1), axis=1) == 0):
+        raise ValueError("tetrahedral geometry maps contain invalid corner DOFs")
+    return corner_dofs
 
 
 def _collect_solver_artifacts(output_root: Path) -> dict[str, bytes]:
@@ -346,6 +362,36 @@ def _solve_tensile_case(
         field_file.write_function(von_mises_field, t=0.0)
 
     num_cells = int(comm.allreduce(domain.topology.index_map(domain.topology.dim).size_local))
+    local_cell_count = domain.topology.index_map(domain.topology.dim).size_local
+    geometry_cell_dofs = domain.geometry.dofmaps[0]
+    tetrahedra = _tetrahedron_corner_dofs(geometry_cell_dofs[:local_cell_count])
+    vm_cell_values = []
+    stress_cell_values = []
+    displacement_cell_values = []
+    vm_coefficients = von_mises_field.x.array
+    vm_dofmap = von_mises_field.function_space.dofmap
+    stress_coefficients = stress_field.x.array.reshape((-1, 3, 3))
+    stress_dofmap = stress_field.function_space.dofmap
+    displacement_coefficients = axial_displacement.x.array
+    displacement_dofmap = axial_displacement.function_space.dofmap
+    for cell in range(local_cell_count):
+        vm_cell_values.append(float(np.mean(vm_coefficients[vm_dofmap.cell_dofs(cell)])))
+        stress_cell_values.append(
+            float(np.mean(stress_coefficients[stress_dofmap.cell_dofs(cell), 0, 0]))
+        )
+        displacement_cell_values.append(
+            float(np.mean(displacement_coefficients[displacement_dofmap.cell_dofs(cell)]))
+        )
+    mesh_digest = hashlib.sha256(mesh_path.read_bytes()).hexdigest()
+    preview_bytes = build_surface_field_preview(
+        domain.geometry.x[:, :3],
+        tetrahedra,
+        vm_cell_values,
+        stress_cell_values,
+        displacement_cell_values,
+        mesh_digest,
+    )
+    (output_root / "field-preview.json").write_bytes(preview_bytes)
     return {
         "result": {
             "reaction_force_n": reaction,

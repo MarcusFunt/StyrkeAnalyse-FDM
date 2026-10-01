@@ -264,12 +264,13 @@ def test_isotropic_fem_runs_as_a_persistent_job_and_replays_saved_request(tmp_pa
         "element_order": 2,
         "optimize": True,
     }
-    assert len(run.stages[0].output_artifacts) == 5
+    assert len(run.stages[0].output_artifacts) == 6
     assert {item.media_type for item in run.stages[0].output_artifacts} == {
         "application/vnd.styrkeanalyse.fem-result+json",
         "application/vnd.gmsh.msh",
         "application/vnd.xdmf+xml",
         "application/x-hdf5",
+        "application/vnd.styrkeanalyse.fem-field-preview+json",
         "application/vnd.styrkeanalyse.stage-provenance+json",
     }
     provenance_reference = next(
@@ -305,6 +306,36 @@ def test_isotropic_fem_runs_as_a_persistent_job_and_replays_saved_request(tmp_pa
         service.read_artifact(run.input_artifacts[0].sha256),
         service.read_artifact(run.input_artifacts[0].sha256),
     ]
+
+
+def test_replay_of_pre_preview_fem_run_uses_saved_output_contract(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    import fdm_strength.runner_service as runner_service_module
+    from fdm_strength.stage_registry import stage_for_operation
+
+    current_lookup = runner_service_module.stage_for_operation
+    current_definition = stage_for_operation("fdm-l2-isotropic")
+    legacy_outputs = tuple(
+        name for name in current_definition.expected_outputs if name != "field-preview.json"
+    )
+    executor = _FakeStageExecutor()
+    service = RunService(tmp_path, executor=executor)
+
+    monkeypatch.setattr(
+        runner_service_module,
+        "stage_for_operation",
+        lambda operation: replace(current_lookup(operation), expected_outputs=legacy_outputs),
+    )
+    original, _ = service.submit(_fem_submission())
+    assert original.status == "succeeded"
+    assert "field-preview.json" not in executor.seen_contracts[0].expected_outputs
+
+    monkeypatch.undo()
+    replay, _ = service.replay(original.id)
+
+    assert replay.status == "succeeded"
+    assert executor.seen_contracts[1].expected_outputs == legacy_outputs
 
 
 def test_isotropic_fem_rejects_noncanonical_request_and_generic_parameters(tmp_path):
@@ -599,6 +630,7 @@ class _FakeStageExecutor:
             analytical_tensile_response,
             model_sha256,
         )
+        from fdm_strength.fem_preview import build_surface_field_preview
         from fdm_strength.provenance import ProvenanceArtifact, StageProvenance
 
         request = IsotropicTensileRequest.model_validate_json(source)
@@ -606,14 +638,30 @@ class _FakeStageExecutor:
         mesh = b"fake-gmsh-mesh"
         xdmf = b"fake-xdmf-fields"
         fields = b"fake-hdf5-fields"
+        mesh_digest = hashlib.sha256(mesh).hexdigest()
+        field_preview = build_surface_field_preview(
+            points_mm=((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)),
+            tetrahedra=((0, 1, 2, 3),),
+            von_mises_mpa=(analytical.nominal_stress_mpa,),
+            axial_stress_mpa=(analytical.nominal_stress_mpa,),
+            axial_displacement_mm=(analytical.axial_displacement_mm / 2,),
+            mesh_sha256=mesh_digest,
+        )
         runtime_versions = {"python": "3.12", "pydantic": "2.13.5", "dolfinx": "0.11.0.post0"}
         media_types = {
             "result.json": "application/vnd.styrkeanalyse.fem-result+json",
             "mesh.msh": "application/vnd.gmsh.msh",
             "fields.xdmf": "application/vnd.xdmf+xml",
             "fields.h5": "application/x-hdf5",
+            "field-preview.json": "application/vnd.styrkeanalyse.fem-field-preview+json",
         }
-        artifacts = {"mesh.msh": mesh, "fields.xdmf": xdmf, "fields.h5": fields}
+        artifacts = {
+            "mesh.msh": mesh,
+            "fields.xdmf": xdmf,
+            "fields.h5": fields,
+        }
+        if "field-preview.json" in contract.expected_outputs:
+            artifacts["field-preview.json"] = field_preview
         result = {
             "schema_version": 1,
             "run_id": contract.run_id,
@@ -629,7 +677,7 @@ class _FakeStageExecutor:
             },
             "mesh": {
                 **request.mesh.model_dump(mode="json"),
-                "sha256": hashlib.sha256(mesh).hexdigest(),
+                "sha256": mesh_digest,
                 "cell_count": 1,
             },
             "solver_metadata": {

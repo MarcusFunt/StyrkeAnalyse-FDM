@@ -32,6 +32,8 @@ class StageDefinition:
     mpi_ranks: int = 1
     omp_threads: int = 1
     openblas_threads: int = 1
+    # Replays may use only explicitly retained historical artifact contracts.
+    replay_output_contracts: tuple[tuple[str, ...], ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -84,7 +86,11 @@ _ISOTROPIC_FEM = StageDefinition(
         "mesh.msh",
         "fields.xdmf",
         "fields.h5",
+        "field-preview.json",
         "provenance.json",
+    ),
+    replay_output_contracts=(
+        ("result.json", "mesh.msh", "fields.xdmf", "fields.h5", "provenance.json"),
     ),
     timeout_seconds=600,
     cpu_count=2,

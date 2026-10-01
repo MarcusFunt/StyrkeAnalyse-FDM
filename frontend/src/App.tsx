@@ -6,6 +6,7 @@ import {
   ArrowDownToLine,
   ArrowRight,
   BarChart3,
+  Box,
   Check,
   CheckCircle2,
   ChevronRight,
@@ -40,10 +41,13 @@ import {
   type SensorSource,
   type StudyWorkspace,
 } from "./lib/workspace";
+import { createFemSubmission, type FemJobStatus, type IsotropicTensileRequest } from "./lib/fem";
+import { loadFemRun, type FemRunDetailData } from "./lib/femRun";
+import FemPage from "./FemPage";
 
 const ResultsChart = lazy(() => import("./ResultsChart"));
 
-type Page = "overview" | "data" | "results";
+type Page = "overview" | "data" | "results" | "fem";
 type ApiState = "checking" | "ready" | "offline";
 type ForceUnit = "N" | "kN";
 type DisplacementUnit = "mm" | "cm";
@@ -149,8 +153,9 @@ interface RunnerJobEnvelope {
 }
 
 async function submitRunAndWait(
-  requestBody: Record<string, unknown>,
+  requestBody: object,
   failureMessage: string,
+  onStatus?: (status: "queued" | "running" | "succeeded" | "failed") => void,
 ): Promise<RunnerJobEnvelope> {
   const response = await fetch("/api/runs", {
     method: "POST",
@@ -163,6 +168,7 @@ async function submitRunAndWait(
   }
   const jobId = queued.job?.id;
   if (typeof jobId !== "string") throw new Error("The runner did not return a job ID.");
+  onStatus?.("queued");
 
   // The browser never holds a long-lived solver request open. FEM/RVE stages may
   // take minutes or hours; polling keeps the control plane responsive.
@@ -171,6 +177,12 @@ async function submitRunAndWait(
     const payload = await statusResponse.json() as RunnerJobEnvelope;
     if (!statusResponse.ok) {
       throw new Error(typeof payload.error === "string" ? payload.error : failureMessage);
+    }
+    if (
+      payload.job?.status === "queued" || payload.job?.status === "running" ||
+      payload.job?.status === "succeeded" || payload.job?.status === "failed"
+    ) {
+      onStatus?.(payload.job.status);
     }
     if (payload.job?.status === "succeeded") {
       if (!payload.run || !payload.result) {
@@ -216,11 +228,19 @@ export default function App() {
   const [permanentDeleteId, setPermanentDeleteId] = useState<string | null>(null);
   const [isSavingDesktop, setIsSavingDesktop] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [femStatus, setFemStatus] = useState<FemJobStatus>("idle");
+  const [femError, setFemError] = useState("");
+  const [femRunId, setFemRunId] = useState<string | null>(null);
+  const [femDetail, setFemDetail] = useState<FemRunDetailData | null>(null);
+  const [femDetailError, setFemDetailError] = useState("");
+  const [femDetailLoading, setFemDetailLoading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [message, setMessage] = useState("");
   const csvInput = useRef<HTMLInputElement>(null);
   const workspaceInput = useRef<HTMLInputElement>(null);
   const analysisInputFingerprintRef = useRef("");
+  const femSubmissionInFlightRef = useRef(false);
+  const femSubmissionGenerationRef = useRef(0);
   const currentAnalysisFingerprint = analysisInputFingerprint({
     rows,
     columns,
@@ -1015,6 +1035,50 @@ export default function App() {
     }
   }
 
+  async function submitFemSolve(request: IsotropicTensileRequest): Promise<void> {
+    if (femSubmissionInFlightRef.current) return;
+    femSubmissionInFlightRef.current = true;
+    const generation = ++femSubmissionGenerationRef.current;
+    setFemError("");
+    setFemRunId(null);
+    setFemDetail(null);
+    setFemDetailError("");
+    setFemDetailLoading(false);
+    setFemStatus("preparing");
+    try {
+      const submission = await createFemSubmission(request);
+      if (generation !== femSubmissionGenerationRef.current) return;
+      const payload = await submitRunAndWait(
+        submission,
+        "Finite element solve failed. Check the specimen, material and mesh settings.",
+        setFemStatus,
+      );
+      if (generation !== femSubmissionGenerationRef.current) return;
+      const runId = (payload.run as { id?: unknown } | undefined)?.id;
+      if (typeof runId !== "string") throw new Error("The completed FEM job omitted its immutable Run ID.");
+      setFemRunId(runId);
+      setFemStatus("succeeded");
+      setFemDetailLoading(true);
+      try {
+        const detail = await loadFemRun(runId);
+        if (generation === femSubmissionGenerationRef.current) setFemDetail(detail);
+      } catch (error) {
+        if (generation === femSubmissionGenerationRef.current) {
+          setFemDetailError(error instanceof Error ? error.message : "The FEM Run succeeded, but its inspection artifacts could not be loaded.");
+        }
+      } finally {
+        if (generation === femSubmissionGenerationRef.current) setFemDetailLoading(false);
+      }
+    } catch (error) {
+      if (generation === femSubmissionGenerationRef.current) {
+        setFemStatus("failed");
+        setFemError(error instanceof Error ? error.message : "Could not complete the FEM solve.");
+      }
+    } finally {
+      if (generation === femSubmissionGenerationRef.current) femSubmissionInFlightRef.current = false;
+    }
+  }
+
   function downloadReducedCsv(): void {
     if (!analysis) return;
     const exported = analysis.points.map((point, index) => ({
@@ -1049,7 +1113,11 @@ export default function App() {
     );
   }
 
-  const pageTitle = page === "overview" ? "Study overview" : page === "data" ? "Data & setup" : "Results explorer";
+  const pageTitle = page === "overview"
+    ? "Study overview"
+    : page === "data"
+      ? "Data & setup"
+      : page === "fem" ? "Finite element models" : "Results explorer";
   const campaignSpecimens = createWorkspace().specimens;
 
   return (
@@ -1078,11 +1146,14 @@ export default function App() {
           <button aria-label="Results" className={page === "results" ? "nav-item active" : "nav-item"} onClick={() => setPage("results")}>
             <BarChart3 size={17} /><span>Results</span>
           </button>
+          <button aria-label="Finite element models" className={page === "fem" ? "nav-item active" : "nav-item"} onClick={() => setPage("fem")}>
+            <Box size={17} /><span>Finite element models</span>
+          </button>
           <div className="nav-divider" />
           <span className="eyebrow">RESEARCH PIPELINE</span>
           <div className="pipeline-nav-item"><CheckCircle2 size={16} /><span>Baseline tensile</span><span className="ready-dot" /></div>
           <div className="pipeline-nav-item muted"><CircleAlert size={16} /><span>Experimental reduction</span><span className="soon-tag">NEXT</span></div>
-          <div className="pipeline-nav-item muted"><CircleAlert size={16} /><span>Finite element models</span><span className="soon-tag">LATER</span></div>
+          <div className="pipeline-nav-item"><CheckCircle2 size={16} /><span>Finite element models</span><span className="soon-tag">GUI</span></div>
         </nav>
         <div className="sidebar-bottom">
           <div className="local-card">
@@ -1162,9 +1233,9 @@ export default function App() {
             <div>
               <div className="page-kicker">FDM STRENGTH ANALYSIS</div>
               <h1>{pageTitle}</h1>
-              <p>{page === "overview" ? "A clear path from test data to traceable results." : page === "data" ? "Bring in a tensile test, confirm the columns and specimen dimensions." : "Inspect the measured curve and the calculation behind it."}</p>
+              <p>{page === "overview" ? "A clear path from test data to traceable results." : page === "data" ? "Bring in a tensile test, confirm the columns and specimen dimensions." : page === "fem" ? "Configure an isotropic solve and inspect its immutable results." : "Inspect the measured curve and the calculation behind it."}</p>
             </div>
-            <div className="heading-state"><span className={rows.length ? "state-check complete" : "state-check"}>{rows.length ? <Check size={13} /> : "1"}</span><span>Data</span><span className="state-line" /><span className={analysis ? "state-check complete" : "state-check"}>{analysis ? <Check size={13} /> : "2"}</span><span>Results</span></div>
+            {page !== "fem" && <div className="heading-state"><span className={rows.length ? "state-check complete" : "state-check"}>{rows.length ? <Check size={13} /> : "1"}</span><span>Data</span><span className="state-line" /><span className={analysis ? "state-check complete" : "state-check"}>{analysis ? <Check size={13} /> : "2"}</span><span>Results</span></div>}
           </div>
 
           {message && <div className="alert-box" role="alert"><CircleAlert size={17} /><span>{message}</span><button aria-label="Dismiss message" onClick={() => setMessage("")}>×</button></div>}
@@ -1179,6 +1250,7 @@ export default function App() {
               onImport={() => csvInput.current?.click()}
               onData={() => setPage("data")}
               onResults={() => setPage("results")}
+              onFem={() => setPage("fem")}
               onTemplate={downloadTemplate}
             />
           )}
@@ -1237,6 +1309,19 @@ export default function App() {
             />
           )}
 
+          {page === "fem" && (
+            <FemPage
+              apiReady={apiState === "ready"}
+              status={femStatus}
+              error={femError}
+              runId={femRunId}
+              detail={femDetail}
+              detailError={femDetailError}
+              loadingDetail={femDetailLoading}
+              onSubmit={submitFemSolve}
+            />
+          )}
+
           <input
             ref={csvInput}
             type="file"
@@ -1290,6 +1375,7 @@ interface OverviewPageProps {
   onImport: () => void;
   onData: () => void;
   onResults: () => void;
+  onFem: () => void;
   onTemplate: () => void;
 }
 
@@ -1329,14 +1415,15 @@ function OverviewPage(props: OverviewPageProps) {
 
       <div className="section-title-row"><div><div className="section-eyebrow">YOUR WORKFLOW</div><h2>One step at a time</h2></div><span className="section-side-note">Baseline analysis is available now</span></div>
       <section className="workflow-cards">
-        <WorkflowCard number="01" icon={<Database size={18} />} title="Import your measurements" status={hasData ? "complete" : "current"} description={hasData ? `${props.sourceFileName} · ${props.rowCount.toLocaleString()} rows` : "Upload a CSV or TSV from your test rig."} action={hasData ? "Review data" : "Start here"} onClick={props.onData} />
-        <WorkflowCard number="02" icon={<Settings2 size={18} />} title="Confirm columns & specimen" status={hasData ? "current" : "locked"} description="Map force and displacement; enter width, thickness and gauge length." action="Configure" onClick={props.onData} />
-        <WorkflowCard number="03" icon={<BarChart3 size={18} />} title="Explore the response" status={props.hasAnalysis ? "complete" : "locked"} description={props.hasAnalysis ? "View curves, peak values and downloadable results." : "Review force-extension and stress-strain curves."} action={props.hasAnalysis ? "View results" : "See results"} onClick={props.onResults} />
+      <WorkflowCard number="01" icon={<Database size={18} />} title="Import your measurements" status={hasData ? "complete" : "current"} description={hasData ? `${props.sourceFileName} · ${props.rowCount.toLocaleString()} rows` : "Upload a CSV or TSV from your test rig."} action={hasData ? "Review data" : "Start here"} onClick={props.onData} />
+      <WorkflowCard number="02" icon={<Settings2 size={18} />} title="Confirm columns & specimen" status={hasData ? "current" : "locked"} description="Map force and displacement; enter width, thickness and gauge length." action="Configure" onClick={props.onData} />
+      <WorkflowCard number="03" icon={<BarChart3 size={18} />} title="Explore the response" status={props.hasAnalysis ? "complete" : "locked"} description={props.hasAnalysis ? "View curves, peak values and downloadable results." : "Review force-extension and stress-strain curves."} action={props.hasAnalysis ? "View results" : "See results"} onClick={props.onResults} />
+      <WorkflowCard number="04" icon={<Box size={18} />} title="Submit an isotropic FEM solve" status="current" description="Configure a rectangular tensile model and inspect its solver Run." action="Open FEM" onClick={props.onFem} />
       </section>
 
       <section className="capability-strip">
         <div className="capability-icon"><Info size={17} /></div>
-        <div><strong>What this version calculates</strong><p>Nominal tensile stress from force and cross-sectional area, plus engineering strain from extension and gauge length. FEM and material-model comparisons will appear here when those workflows are implemented.</p></div>
+        <div><strong>What this version calculates</strong><p>Nominal tensile response, campaign reduction, and the formal isotropic FEM baseline. M4 solver verification and experimental model validation remain separate evidence states.</p></div>
         <div className="capability-badge"><CheckCircle2 size={14} /> Baseline ready</div>
       </section>
     </>
