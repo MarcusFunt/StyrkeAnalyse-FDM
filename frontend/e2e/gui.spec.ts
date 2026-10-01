@@ -182,3 +182,43 @@ test("trash, retention, restore, and permanent deletion are accessible", async (
   await dialog.getByRole("button", { name: "Delete permanently" }).click();
   await expect(page.getByText("Trash (0)")).toBeVisible();
 });
+
+test("submit a real FEM solve and inspect its mesh, fields, results and provenance", async ({ page }) => {
+  test.setTimeout(180_000);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Finite element models" }).click();
+  await expect(page.getByRole("heading", { name: "Rectangular tensile specimen" })).toBeVisible();
+  await page.getByRole("button", { name: "Submit FEM solve" }).click();
+
+  await expect(page.getByText("Run succeeded")).toBeVisible({ timeout: 180_000 });
+  await expect(page.getByRole("heading", { name: "Solve results and evidence" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText("Reaction force", { exact: true })).toBeVisible();
+  await expect(page.getByText("Not assessed for this Run")).toBeVisible();
+  await expect(page.getByText("Not validated against experiment")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Surface mesh and field preview" })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Field to visualize" })).toBeVisible();
+  await expect(page.getByText(/surface approximation of element averages/)).toBeVisible();
+
+  for (const artifactName of ["mesh.msh", "fields.xdmf", "fields.h5", "field-preview.json", "provenance.json"]) {
+    const artifact = page.getByRole("link", { name: new RegExp(artifactName.replaceAll(".", "\\.")) });
+    await expect(artifact).toBeVisible();
+    await expect(artifact).toHaveAttribute("href", /^\/api\/artifacts\/[0-9a-f]{64}$/);
+  }
+  await expect(page.getByText(/Image digest/)).toBeVisible();
+  await expect(page.getByText(/Dependency lock SHA-256/)).toBeVisible();
+  await expectNoSeriousA11yViolations(page);
+});
+
+test("show the runner error when FEM submission fails", async ({ page }) => {
+  await page.route("**/api/runs", (route) => route.fulfill({
+    status: 422,
+    contentType: "application/json",
+    body: JSON.stringify({ error: "Simulated FEM runner rejection for browser coverage." }),
+  }));
+  await page.goto("/");
+  await page.getByRole("button", { name: "Finite element models" }).click();
+  await page.getByRole("button", { name: "Submit FEM solve" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "Simulated FEM runner rejection" })).toBeVisible();
+  await expect(page.getByText("Run failed")).toBeVisible();
+  await expectNoSeriousA11yViolations(page);
+});

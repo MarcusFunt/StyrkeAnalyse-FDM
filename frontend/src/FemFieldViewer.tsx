@@ -81,13 +81,12 @@ export default function FemFieldViewer({ preview }: { preview: FemFieldPreview }
       </div>
       <div className="fem-viewer-body">
         <svg className="fem-mesh-svg" viewBox="0 0 600 410" role="img" aria-label={`${selected.label} surface field over ${polygons.length.toLocaleString()} boundary triangles`}>
-          <defs><linearGradient id="fem-field-legend" x1="0" x2="1"><stop offset="0%" stopColor={color(minimum)} /><stop offset="100%" stopColor={color(maximum)} /></linearGradient></defs>
           <rect x="0" y="0" width="600" height="410" rx="10" fill="#f7faf9" />
           {polygons.map((polygon) => <polygon key={polygon.index} points={polygon.points} fill={color(polygon.value)} stroke={showEdges ? "#263f4a" : "none"} strokeWidth={showEdges ? "0.65" : "0"} strokeLinejoin="round" />)}
         </svg>
         <div className="fem-viewer-legend">
           <div className="fem-legend-labels"><strong>{selected.label}</strong><span>{selected.unit}</span></div>
-          <div className="fem-legend-gradient" />
+          <div className="fem-legend-gradient" style={{ background: `linear-gradient(90deg, ${color(minimum)}, ${color((minimum + maximum) / 2)}, ${color(maximum)})` }} />
           <div className="fem-legend-range"><span>{minimum.toLocaleString(undefined, { maximumSignificantDigits: 5 })}</span><span>{maximum.toLocaleString(undefined, { maximumSignificantDigits: 5 })}</span></div>
           <label className="fem-edge-toggle"><input type="checkbox" checked={showEdges} onChange={(event) => setShowEdges(event.target.checked)} /> Show mesh edges</label>
         </div>
