@@ -91,7 +91,7 @@
 **Interfaces:**
 - The browser workflow exercises actual `/api/runs`, `/api/jobs`, `/api/artifacts` endpoints and the existing pinned stage image; no mocked solver result.
 
-- [ ] Add a Playwright scenario submitting a P1 tensile solve, observing queued/running/succeeded state, and checking scalar, visualization, provenance, verification labels, and all solver-artifact links.
-- [ ] Add a browser scenario for a failed FEM job, verifying the runner error is shown.
-- [ ] Run frontend browser checks and the full repository Verify workflow, including a clean pinned-image FEM solve.
-- [ ] Commit as `test: cover GUI FEM submission and inspection`.
+- [x] Add a Playwright scenario submitting a P1 tensile solve, observing queued/running/succeeded state, and checking scalar, visualization, provenance, verification labels, and all solver-artifact links.
+- [x] Add a browser scenario for a failed FEM job, verifying the runner error is shown.
+- [x] Run frontend browser checks and the full repository Verify workflow, including a clean pinned-image FEM solve.
+- [x] Commit as `test: cover GUI FEM submission and inspection`.
