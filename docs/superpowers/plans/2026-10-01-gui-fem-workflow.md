@@ -77,11 +77,11 @@
 - `FemFieldViewer` renders boundary triangle averages for von Mises stress, axial stress, or axial displacement, with rotate controls and mesh-edge toggle; it labels the view as a surface approximation.
 - Run detail presents scalar results, explicit `not_assessed` status, separate validation state, material/BC/mesh identities, runtime/image/source/dependency provenance, and SHA-linked artifact downloads.
 
-- [ ] Write `test_parse_fem_run_binds_preview_to_declared_output_and_mesh`, `test_parse_fem_run_rejects_missing_or_malformed_preview`, `test_parse_fem_run_rejects_preview_over_size_limit`, and `test_fem_run_detail_labels_run_gate_and_validation_separately`.
-- [ ] Run `npm test --prefix frontend -- src/lib/femRun.test.ts`; confirm the loader is missing.
-- [ ] Implement fail-closed loading, SVG mesh field rendering, scalar/provenance cards, and artifact downloads.
-- [ ] Run the targeted Vitest files and `npm run build --prefix frontend`.
-- [ ] Commit as `feat: inspect FEM fields and provenance in GUI`.
+- [x] Write `test_parse_fem_run_binds_preview_to_declared_output_and_mesh`, `test_parse_fem_run_rejects_missing_or_malformed_preview`, `test_parse_fem_run_rejects_preview_over_size_limit`, and `test_fem_run_detail_labels_run_gate_and_validation_separately`.
+- [x] Run `npm test --prefix frontend -- src/lib/femRun.test.ts`; confirm the loader is missing.
+- [x] Implement fail-closed loading, SVG mesh field rendering, scalar/provenance cards, and artifact downloads.
+- [x] Run the targeted Vitest files and `npm run build --prefix frontend`.
+- [x] Commit as `feat: inspect FEM fields and provenance in GUI`.
 
 ### Task 4: Browser integration and end-to-end verification
 

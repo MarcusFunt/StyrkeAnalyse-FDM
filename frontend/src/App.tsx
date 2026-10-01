@@ -42,6 +42,7 @@ import {
   type StudyWorkspace,
 } from "./lib/workspace";
 import { createFemSubmission, type FemJobStatus, type IsotropicTensileRequest } from "./lib/fem";
+import { loadFemRun, type FemRunDetailData } from "./lib/femRun";
 import FemPage from "./FemPage";
 
 const ResultsChart = lazy(() => import("./ResultsChart"));
@@ -230,6 +231,9 @@ export default function App() {
   const [femStatus, setFemStatus] = useState<FemJobStatus>("idle");
   const [femError, setFemError] = useState("");
   const [femRunId, setFemRunId] = useState<string | null>(null);
+  const [femDetail, setFemDetail] = useState<FemRunDetailData | null>(null);
+  const [femDetailError, setFemDetailError] = useState("");
+  const [femDetailLoading, setFemDetailLoading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [message, setMessage] = useState("");
   const csvInput = useRef<HTMLInputElement>(null);
@@ -1032,6 +1036,9 @@ export default function App() {
   async function submitFemSolve(request: IsotropicTensileRequest): Promise<void> {
     setFemError("");
     setFemRunId(null);
+    setFemDetail(null);
+    setFemDetailError("");
+    setFemDetailLoading(false);
     setFemStatus("idle");
     try {
       const submission = await createFemSubmission(request);
@@ -1044,6 +1051,14 @@ export default function App() {
       if (typeof runId !== "string") throw new Error("The completed FEM job omitted its immutable Run ID.");
       setFemRunId(runId);
       setFemStatus("succeeded");
+      setFemDetailLoading(true);
+      try {
+        setFemDetail(await loadFemRun(runId));
+      } catch (error) {
+        setFemDetailError(error instanceof Error ? error.message : "The FEM Run succeeded, but its inspection artifacts could not be loaded.");
+      } finally {
+        setFemDetailLoading(false);
+      }
     } catch (error) {
       setFemStatus("failed");
       setFemError(error instanceof Error ? error.message : "Could not complete the FEM solve.");
@@ -1286,6 +1301,9 @@ export default function App() {
               status={femStatus}
               error={femError}
               runId={femRunId}
+              detail={femDetail}
+              detailError={femDetailError}
+              loadingDetail={femDetailLoading}
               onSubmit={submitFemSolve}
             />
           )}

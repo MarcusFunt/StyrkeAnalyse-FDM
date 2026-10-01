@@ -14,7 +14,7 @@ Let a researcher configure and submit the existing `fdm-l2-isotropic` tensile st
 
 ## Design
 
-Add a Finite element page in the existing GUI. Its first form targets only the supported rectangular tensile/isotropic stage, exposes specimen ID and dimensions, isotropic material constants, axial force, mesh size, and P1/P2 element order, and submits only `operation`, the SHA-256-addressed canonical request file, empty generic parameters, and no upstream Runs. The current server-owned stage continues to enforce execution policy.
+Add a Finite element page in the existing GUI. Its first form targets only the supported rectangular tensile/isotropic stage, exposes specimen ID and dimensions, material profile ID and isotropic material constants, axial force, mesh size, and P1/P2 element order, and submits only `operation`, the SHA-256-addressed canonical request file, empty generic parameters, and no upstream Runs. The current server-owned stage continues to enforce execution policy.
 
 The runner currently returns scalar results and the Run artifact references, while DOLFINx writes complete field data in XDMF/HDF5. Add one explicit `field-preview.json` stage artifact containing the real generated boundary triangles and their element-averaged von Mises stress, axial stress, and axial displacement. Cap the preview at 20,000 deterministically sampled surface triangles and label sampled previews. Hash and record the preview alongside the existing exact mesh/field outputs. The UI renders this surface preview with field selection, rotate controls, mesh edges, units, min/max values, and links to download the exact mesh and complete field files.
 

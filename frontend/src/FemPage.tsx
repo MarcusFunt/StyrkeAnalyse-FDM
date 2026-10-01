@@ -6,6 +6,8 @@ import {
   type FemJobStatus,
   type IsotropicTensileRequest,
 } from "./lib/fem";
+import type { FemRunDetailData } from "./lib/femRun";
+import FemRunDetail from "./FemRunDetail";
 
 const initialValues: FemFormValues = {
   specimenId: "FEM-T01",
@@ -26,6 +28,9 @@ interface FemPageProps {
   status: FemJobStatus;
   error: string;
   runId: string | null;
+  detail: FemRunDetailData | null;
+  detailError: string;
+  loadingDetail: boolean;
   onSubmit: (request: IsotropicTensileRequest) => Promise<void>;
 }
 
@@ -143,6 +148,10 @@ export default function FemPage(props: FemPageProps) {
           </section>
         </aside>
       </div>
+
+      {props.runId && props.loadingDetail && <div className="fem-detail-loading" role="status"><LoaderCircle className="fem-spinner" size={17} /> Loading the immutable mesh, fields and provenance…</div>}
+      {props.runId && props.detailError && <div className="fem-error fem-detail-error" role="alert"><CircleAlert size={16} /><span>{props.detailError}</span></div>}
+      {props.detail && <FemRunDetail detail={props.detail} />}
     </div>
   );
 }
