@@ -54,17 +54,17 @@
 - Modify: `frontend/src/App.tsx`, `frontend/src/styles.css`
 
 **Interfaces:**
-- Export `FemFormValues` with string fields `specimenId`, `lengthMm`, `widthMm`, `thicknessMm`, `youngsModulusMpa`, `poissonsRatio`, `forceN`, `maxCellSizeMm`, plus `elementOrder: 1 | 2` and `optimize: boolean`.
+- Export `FemFormValues` with string fields `specimenId`, `lengthMm`, `widthMm`, `thicknessMm`, `materialProfileId`, `youngsModulusMpa`, `poissonsRatio`, `forceN`, `maxCellSizeMm`, plus `elementOrder: 1 | 2` and `optimize: boolean`.
 - `buildIsotropicTensileRequest(form: FemFormValues) -> IsotropicTensileRequest` validates finite positive dimensions, force, modulus, valid Poisson ratio, and P1/P2 mesh choice; emits schema version 1, axial-x load/BCs, and millimetre/MPa/N values.
 - `createFemSubmission(request: IsotropicTensileRequest) -> Promise<RunSubmissionPayload>` serializes canonical stable JSON, hashes exact UTF-8 bytes using Web Crypto, base64 encodes those bytes, and returns operation `fdm-l2-isotropic` with input name `request.json`, FEM request media type, empty parameters, and no upstream Runs.
 - `FemPage` accepts submit/status/result callbacks and renders the explicit stage inputs plus Run status.
 
-- [ ] Write `test_build_isotropic_tensile_request_keeps_units_and_mesh_order_explicit`, `test_create_fem_submission_hashes_exact_canonical_bytes`, and `test_build_isotropic_tensile_request_rejects_invalid_dimensions_and_material`.
-- [ ] Run `npm test --prefix frontend -- src/lib/fem.test.ts`; confirm the helper is missing.
-- [ ] Implement validated request/submission helpers and the FEM form page.
-- [ ] Add the FEM navigation route and server-poll status callback (`queued`, `running`, terminal state) without changing tensile polling behavior.
-- [ ] Run `npm test --prefix frontend -- src/lib/fem.test.ts` and `npm run build --prefix frontend`.
-- [ ] Commit as `feat: add isotropic FEM submission page`.
+- [x] Write `test_build_isotropic_tensile_request_keeps_units_and_mesh_order_explicit`, `test_create_fem_submission_hashes_exact_canonical_bytes`, and `test_build_isotropic_tensile_request_rejects_invalid_dimensions_and_material`.
+- [x] Run `npm test --prefix frontend -- src/lib/fem.test.ts`; confirm the helper is missing.
+- [x] Implement validated request/submission helpers and the FEM form page.
+- [x] Add the FEM navigation route and server-poll status callback (`queued`, `running`, terminal state) without changing tensile polling behavior.
+- [x] Run `npm test --prefix frontend -- src/lib/fem.test.ts` and `npm run build --prefix frontend`.
+- [x] Commit as `feat: add isotropic FEM submission page`.
 
 ### Task 3: Immutable Run results, viewer, and evidence panel
 
