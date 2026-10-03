@@ -38,7 +38,17 @@ replicate-readiness check. This is deliberately not called model-validation
 readiness: solver verification, calibration/validation separation, and held-out
 prediction evidence are separate gates. Desktop saves use revisions to detect
 conflicting edits; deleted studies can be restored during the selected retention
-period.
+period. The specimen geometry panel now includes checked ASTM D638-22 Type I,
+Type IV, and Type V presets for nominal gauge width, gauge length, and the
+3.2 mm reference-CAD thickness; physical specimen reductions should still use
+measured printed width and thickness.
+
+The formal isotropic FEM page supports both the original rectangular
+verification coupon and full analytic ASTM D638 Type I/IV/V dog-bone solids.
+D638 runs use the checked package dimensions, a measured thickness, and a
+uniform end-face traction corresponding to the requested axial force. The Run
+records the standard revision and nominal geometry source separately from
+solver verification or experimental validation.
 
 Solver-independent reference modules now cover tensile and three-point-bend
 formulas, classical laminate theory, general 3D orthotropic stiffness (with a
@@ -178,9 +188,10 @@ start when you sign in. Compose uses `restart: unless-stopped`, so the GUI
 container comes back when Docker starts. If the desktop is asleep or powered
 off, remote access is unavailable.
 
-This release runs tensile baseline and replicate-reduction workflows through the
-asynchronous scientific runner and stores saved workspaces on the desktop. It
-does not yet expose FEM solver jobs in the GUI. Stage provenance v2 records the
+This release runs tensile baseline, replicate-reduction, and formal isotropic
+FEM workflows through the asynchronous scientific runner and stores saved
+workspaces on the desktop. The FEM GUI can submit rectangular verification
+coupons and checked ASTM D638 Type I/IV/V tensile geometries. Stage provenance v2 records the
 resolved image ID, dependency-lock hash, contract and artifact hashes, source
 revision, runtime, and CPU/thread allocation for formal reduction Runs. The
 DOLFINx base image is pinned by digest. The FEM verification gate remains red
