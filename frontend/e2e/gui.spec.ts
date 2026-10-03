@@ -183,6 +183,17 @@ test("trash, retention, restore, and permanent deletion are accessible", async (
   await expect(page.getByText("Trash (0)")).toBeVisible();
 });
 
+test("ASTM D638 specimen presets expose the checked full geometry", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Finite element models" }).click();
+  await page.getByLabel("Geometry").selectOption("IV");
+
+  await expect(page.getByRole("heading", { name: "ASTM D638 Type IV" })).toBeVisible();
+  await expect(page.getByText("LO 115 mm · WO 19 mm · W 6 mm · L 33 mm · G 25 mm · D 65 mm")).toBeVisible();
+  await expect(page.getByLabel("Measured thickness")).toHaveValue("3.2");
+  await expect(page.getByText(/D is a grip-separation setup dimension/)).toBeVisible();
+});
+
 test("submit a real FEM solve and inspect its mesh, fields, results and provenance", async ({ page }) => {
   test.setTimeout(180_000);
   await page.goto("/");
