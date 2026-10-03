@@ -22,9 +22,10 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from fdm_strength.fem_models import (
-    IsotropicTensileRequest,
+    AnyIsotropicTensileRequest,
     canonical_json_bytes,
     model_sha256,
+    parse_isotropic_tensile_request,
 )
 from fdm_strength.provenance import StageProvenance
 from fdm_strength.run_jobs import JobStore, RunJob
@@ -448,7 +449,7 @@ class RunService:
             if submission.upstream_run_ids:
                 raise ValueError("isotropic FEM requests cannot depend on upstream Runs")
             try:
-                fem_request = IsotropicTensileRequest.model_validate_json(input_bytes)
+                fem_request = parse_isotropic_tensile_request(input_bytes)
             except (UnicodeDecodeError, ValidationError, ValueError) as error:
                 raise ValueError(f"invalid isotropic FEM request: {error}") from error
             if canonical_json_bytes(fem_request) != input_bytes:
@@ -1055,7 +1056,7 @@ def _source_input_name(operation: str) -> str:
 
 def _validate_isotropic_fem_outputs(
     result_payload: dict[str, Any],
-    request: IsotropicTensileRequest | None,
+    request: AnyIsotropicTensileRequest | None,
     contract: StageContract,
     outputs: dict[str, bytes],
     provenance: StageProvenance,
