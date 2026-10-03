@@ -59,6 +59,7 @@ export interface FemResultEnvelope {
   run_id: string;
   stage_id: "fdm-l2-isotropic";
   specimen: Record<string, unknown>;
+  geometry_source?: Record<string, unknown>;
   material: Record<string, unknown>;
   boundary_conditions: Record<string, unknown>;
   mesh: Record<string, unknown> & { sha256: string; cell_count: number };
