@@ -1,7 +1,10 @@
+import type { D638SpecimenType, FemSpecimenShape } from "./specimenPresets";
+
 export type FemJobStatus = "idle" | "preparing" | "queued" | "running" | "succeeded" | "failed";
 
 export interface FemFormValues {
   specimenId: string;
+  specimenShape: FemSpecimenShape;
   lengthMm: string;
   widthMm: string;
   thicknessMm: string;
@@ -14,7 +17,7 @@ export interface FemFormValues {
   optimize: boolean;
 }
 
-export interface IsotropicTensileRequest {
+export interface RectangularIsotropicTensileRequest {
   schema_version: 1;
   specimen: {
     specimen_id: string;
@@ -42,6 +45,40 @@ export interface IsotropicTensileRequest {
     optimize: boolean;
   };
 }
+
+export interface D638IsotropicTensileRequest {
+  schema_version: 2;
+  specimen: {
+    specimen_id: string;
+    standard_revision: "ASTM D638-22";
+    specimen_type: D638SpecimenType;
+    thickness_mm: number;
+  };
+  material: {
+    profile_id: string;
+    youngs_modulus_mpa: number;
+    poissons_ratio: number;
+  };
+  load: { force_n: number };
+  boundary_conditions: {
+    axial_axis: "x";
+    fixed_axial_face: "x_min";
+    loaded_face: "x_max";
+    load_control: "uniform_end_traction";
+    set_id: string;
+    transverse_rigid_mode_control: "3d_minimal_rigid_mode_pins";
+    unloaded_faces: "traction_free";
+  };
+  mesh: {
+    max_cell_size_mm: number;
+    element_order: 1 | 2;
+    optimize: boolean;
+  };
+}
+
+export type IsotropicTensileRequest =
+  | RectangularIsotropicTensileRequest
+  | D638IsotropicTensileRequest;
 
 export interface RunSubmissionPayload {
   operation: "fdm-l2-isotropic";
@@ -87,22 +124,16 @@ export function buildIsotropicTensileRequest(form: FemFormValues): IsotropicTens
   const profileId = form.materialProfileId.trim();
   if (!SAFE_IDENTIFIER.test(profileId)) throw new Error("Material profile ID must be a safe identifier.");
 
-  const length = parseFiniteNumber(form.lengthMm, "Length");
-  const width = parseFiniteNumber(form.widthMm, "Width");
   const thickness = parseFiniteNumber(form.thicknessMm, "Thickness");
   const modulus = parseFiniteNumber(form.youngsModulusMpa, "Young's modulus");
   const poissonsRatio = parseFiniteNumber(form.poissonsRatio, "Poisson's ratio");
   const force = parseFiniteNumber(form.forceN, "Axial force");
   const maxCellSize = parseFiniteNumber(form.maxCellSizeMm, "Maximum element size");
 
-  positive(length, "Length", 1000);
-  positive(width, "Width", 500);
   positive(thickness, "Thickness", 100);
   positive(modulus, "Young's modulus", 1_000_000);
   positive(force, "Axial force", 1_000_000_000);
   positive(maxCellSize, "Maximum element size", 100);
-  if (length <= width) throw new Error("Length must exceed width for the rectangular tensile fixture.");
-  if (width < thickness) throw new Error("Width must be at least thickness.");
   if (poissonsRatio <= -1 || poissonsRatio >= 0.5) {
     throw new Error("Poisson's ratio must be greater than -1 and less than 0.5.");
   }
@@ -110,6 +141,49 @@ export function buildIsotropicTensileRequest(form: FemFormValues): IsotropicTens
     throw new Error("Element order must be P1 or P2.");
   }
   if (typeof form.optimize !== "boolean") throw new Error("Mesh optimization must be selected.");
+
+  const material = {
+    profile_id: profileId,
+    youngs_modulus_mpa: modulus,
+    poissons_ratio: poissonsRatio,
+  };
+  const load = { force_n: force };
+  const mesh = {
+    max_cell_size_mm: maxCellSize,
+    element_order: form.elementOrder,
+    optimize: form.optimize,
+  };
+
+  if (form.specimenShape !== "rectangular") {
+    return {
+      schema_version: 2,
+      specimen: {
+        specimen_id: specimenId,
+        standard_revision: "ASTM D638-22",
+        specimen_type: form.specimenShape,
+        thickness_mm: thickness,
+      },
+      material,
+      load,
+      boundary_conditions: {
+        axial_axis: "x",
+        fixed_axial_face: "x_min",
+        loaded_face: "x_max",
+        load_control: "uniform_end_traction",
+        set_id: "astm-d638-end-traction-v1",
+        transverse_rigid_mode_control: "3d_minimal_rigid_mode_pins",
+        unloaded_faces: "traction_free",
+      },
+      mesh,
+    };
+  }
+
+  const length = parseFiniteNumber(form.lengthMm, "Length");
+  const width = parseFiniteNumber(form.widthMm, "Width");
+  positive(length, "Length", 1000);
+  positive(width, "Width", 500);
+  if (length <= width) throw new Error("Length must exceed width for the rectangular tensile fixture.");
+  if (width < thickness) throw new Error("Width must be at least thickness.");
 
   return {
     schema_version: 1,
@@ -119,12 +193,8 @@ export function buildIsotropicTensileRequest(form: FemFormValues): IsotropicTens
       width_mm: width,
       thickness_mm: thickness,
     },
-    material: {
-      profile_id: profileId,
-      youngs_modulus_mpa: modulus,
-      poissons_ratio: poissonsRatio,
-    },
-    load: { force_n: force },
+    material,
+    load,
     boundary_conditions: {
       axial_axis: "x",
       fixed_axial_face: "x_min",
@@ -133,7 +203,7 @@ export function buildIsotropicTensileRequest(form: FemFormValues): IsotropicTens
       transverse_rigid_mode_control: "3d_minimal_rigid_mode_pins",
       unloaded_faces: "traction_free",
     },
-    mesh: { max_cell_size_mm: maxCellSize, element_order: form.elementOrder, optimize: form.optimize },
+    mesh,
   };
 }
 

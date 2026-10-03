@@ -7,10 +7,12 @@ import {
   type IsotropicTensileRequest,
 } from "./lib/fem";
 import type { FemRunDetailData } from "./lib/femRun";
+import { D638_PRESETS, type FemSpecimenShape } from "./lib/specimenPresets";
 import FemRunDetail from "./FemRunDetail";
 
 const initialValues: FemFormValues = {
   specimenId: "FEM-T01",
+  specimenShape: "rectangular",
   lengthMm: "50",
   widthMm: "10",
   thicknessMm: "2",
@@ -47,6 +49,7 @@ export default function FemPage(props: FemPageProps) {
   const [values, setValues] = useState(initialValues);
   const [formError, setFormError] = useState("");
   const busy = props.status === "preparing" || props.status === "queued" || props.status === "running" || props.loadingDetail;
+  const d638Preset = values.specimenShape === "rectangular" ? null : D638_PRESETS[values.specimenShape];
   const submitLabel = props.status === "preparing"
     ? "Preparing solve…"
     : props.loadingDetail ? "Loading results…" : "Submit FEM solve";
@@ -71,8 +74,10 @@ export default function FemPage(props: FemPageProps) {
       <section className="fem-intro">
         <div>
           <div className="section-eyebrow">FORMAL SOLVER STAGE · FDM-L2-ISOTROPIC</div>
-          <h2>Rectangular tensile specimen</h2>
-          <p>Set the specimen, material, axial load and mesh. The request is sealed as an immutable Run input.</p>
+          <h2>{d638Preset ? d638Preset.label : "Rectangular tensile specimen"}</h2>
+          <p>{d638Preset
+            ? "Solve the checked full dog-bone outline with an end-face traction load. The nominal standard geometry is sealed into the Run."
+            : "Set the specimen, material, axial load and mesh. The request is sealed as an immutable Run input."}</p>
         </div>
         <span className="fem-stage-badge"><ShieldCheck size={15} /> Server controlled stage</span>
       </section>
@@ -82,14 +87,41 @@ export default function FemPage(props: FemPageProps) {
           <fieldset disabled={busy || !props.apiReady}>
             <legend>Specimen geometry</legend>
             <div className="fem-form-grid">
+              <label className="fem-field fem-field-wide" htmlFor="fem-specimen-shape">
+                Geometry
+                <select id="fem-specimen-shape" value={values.specimenShape} onChange={(event) => {
+                  const shape = event.target.value as FemSpecimenShape;
+                  set("specimenShape", shape);
+                  if (shape !== "rectangular") set("thicknessMm", String(D638_PRESETS[shape].nominalThicknessMm));
+                }}>
+                  <option value="rectangular">Rectangular verification coupon</option>
+                  <option value="I">ASTM D638 Type I</option>
+                  <option value="IV">ASTM D638 Type IV</option>
+                  <option value="V">ASTM D638 Type V</option>
+                </select>
+              </label>
               <label className="fem-field fem-field-wide" htmlFor="fem-specimen-id">
                 Specimen ID
                 <input id="fem-specimen-id" value={values.specimenId} onChange={(event) => set("specimenId", event.target.value)} maxLength={128} required />
               </label>
-              <FemNumberField id="fem-length" label="Length" unit="mm" value={values.lengthMm} onChange={(value) => set("lengthMm", value)} min="0.000001" max="1000" />
-              <FemNumberField id="fem-width" label="Width" unit="mm" value={values.widthMm} onChange={(value) => set("widthMm", value)} min="0.000001" max="500" />
-              <FemNumberField id="fem-thickness" label="Thickness" unit="mm" value={values.thicknessMm} onChange={(value) => set("thicknessMm", value)} min="0.000001" max="100" />
+              {d638Preset ? (
+                <>
+                  <FemNumberField id="fem-thickness" label="Measured thickness" unit="mm" value={values.thicknessMm} onChange={(value) => set("thicknessMm", value)} min="0.000001" max="100" />
+                  <div className="d638-preset-summary fem-field-wide" role="note">
+                    <strong>{d638Preset.standardRevision} · Type {d638Preset.type}</strong>
+                    <span>LO {d638Preset.overallLengthMm} mm · WO {d638Preset.overallWidthMm} mm · W {d638Preset.gaugeWidthMm} mm · L {d638Preset.narrowLengthMm} mm · G {d638Preset.gaugeLengthMm} mm · D {d638Preset.gripSeparationMm} mm</span>
+                    <span>R {d638Preset.innerRadiusMm} mm{d638Preset.outerRadiusMm ? ` · RO ${d638Preset.outerRadiusMm} mm` : ""} · nominal CAD T {d638Preset.nominalThicknessMm} mm</span>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <FemNumberField id="fem-length" label="Length" unit="mm" value={values.lengthMm} onChange={(value) => set("lengthMm", value)} min="0.000001" max="1000" />
+                  <FemNumberField id="fem-width" label="Width" unit="mm" value={values.widthMm} onChange={(value) => set("widthMm", value)} min="0.000001" max="500" />
+                  <FemNumberField id="fem-thickness" label="Thickness" unit="mm" value={values.thicknessMm} onChange={(value) => set("thicknessMm", value)} min="0.000001" max="100" />
+                </>
+              )}
             </div>
+            {d638Preset && <p className="fem-form-note">The outline is generated from the checked rig-reference dimensions. Replace 3.2 mm with the measured printed thickness when analysing a physical coupon. D is a grip-separation setup dimension, not the start of the rectangular tab.</p>}
           </fieldset>
 
           <fieldset disabled={busy || !props.apiReady}>
@@ -103,7 +135,7 @@ export default function FemPage(props: FemPageProps) {
               <FemNumberField id="fem-poisson" label="Poisson’s ratio" unit="ν" value={values.poissonsRatio} onChange={(value) => set("poissonsRatio", value)} min="-0.999999" max="0.499999" />
               <FemNumberField id="fem-force" label="Axial force" unit="N" value={values.forceN} onChange={(value) => set("forceN", value)} min="0.000001" max="1000000000" />
             </div>
-            <p className="fem-form-note">Small-strain, linear-elastic isotropic response. Load is applied along the specimen x-axis.</p>
+            <p className="fem-form-note">Small-strain, linear-elastic isotropic response. {d638Preset ? "The requested force is converted to a uniform traction over the full loaded end face." : "The rectangular verification case uses the existing prescribed-displacement equivalent of the requested force."}</p>
           </fieldset>
 
           <fieldset disabled={busy || !props.apiReady}>
