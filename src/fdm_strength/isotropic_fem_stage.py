@@ -330,7 +330,7 @@ def _solve_tensile_case(
             domain,
             np.asarray((end_traction_mpa, 0.0, 0.0), dtype=PETSc.ScalarType),
         )
-        linear += ufl.inner(traction, test) * ds(1)
+        linear = linear + ufl.inner(traction, test) * ds(1)
     problem = LinearProblem(
         bilinear,
         linear,
