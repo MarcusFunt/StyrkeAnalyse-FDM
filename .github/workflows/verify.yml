@@ -201,5 +201,48 @@ jobs:
           fem_replay = wait_job(fem_replay_queue["job"]["id"])
           assert fem_replay["run"]["status"] == "succeeded", fem_replay
           assert fem_replay["result"] == fem_run["result"]
-          print("GUI-to-runner reduction and real isotropic FEM executions with immutable replays succeeded")
+
+          d638_request = {
+              "boundary_conditions": {
+                  "axial_axis": "x", "fixed_axial_face": "x_min",
+                  "loaded_face": "x_max", "load_control": "uniform_end_traction",
+                  "set_id": "astm-d638-end-traction-v1",
+                  "transverse_rigid_mode_control": "3d_minimal_rigid_mode_pins",
+                  "unloaded_faces": "traction_free",
+              },
+              "load": {"force_n": 100.0},
+              "material": {
+                  "poissons_ratio": 0.35, "profile_id": "PLA-isotropic-v1",
+                  "youngs_modulus_mpa": 2000.0,
+              },
+              "mesh": {"element_order": 1, "max_cell_size_mm": 2.0, "optimize": True},
+              "schema_version": 2,
+              "specimen": {
+                  "specimen_id": "ASTM-V-CI", "standard_revision": "ASTM D638-22",
+                  "specimen_type": "V", "thickness_mm": 3.2,
+              },
+          }
+          d638_source = (
+              json.dumps(d638_request, sort_keys=True, separators=(",", ":")) + "\n"
+          ).encode()
+          d638_payload = {
+              "operation": "fdm-l2-isotropic",
+              "input_file": {
+                  "filename": "request.json",
+                  "media_type": "application/vnd.styrkeanalyse.fem-request+json",
+                  "sha256": hashlib.sha256(d638_source).hexdigest(),
+                  "content_base64": base64.b64encode(d638_source).decode("ascii"),
+              },
+              "parameters": {},
+              "upstream_run_ids": [],
+          }
+          d638_queued = call(
+              "http://127.0.0.1:18010/api/runs",
+              json.dumps(d638_payload).encode(),
+          )
+          d638_run = wait_job(d638_queued["job"]["id"])
+          assert d638_run["run"]["status"] == "succeeded", d638_run
+          assert abs(d638_run["result"]["reaction_force_n"] - 100.0) < 0.5, d638_run
+          assert d638_run["result"]["nominal_stress_mpa"] > 0, d638_run
+          print("GUI-to-runner reduction, rectangular FEM replay, and ASTM D638 FEM smoke solve succeeded")
           PY

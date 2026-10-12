@@ -3,6 +3,7 @@ import { buildIsotropicTensileRequest, createFemSubmission, type FemFormValues }
 
 const validForm: FemFormValues = {
   specimenId: "SYN-T01",
+  specimenShape: "rectangular",
   lengthMm: "50",
   widthMm: "10",
   thicknessMm: "2",
@@ -94,4 +95,39 @@ describe("isotropic tensile request", () => {
       /specimen ID/i,
     );
   });
+  it("builds a versioned full ASTM D638 request without pretending it is rectangular", () => {
+    const request = buildIsotropicTensileRequest({
+      ...validForm,
+      specimenShape: "IV",
+      specimenId: "ASTM-IV-01",
+      thicknessMm: "3.2",
+    });
+
+    expect(request).toEqual({
+      schema_version: 2,
+      specimen: {
+        specimen_id: "ASTM-IV-01",
+        standard_revision: "ASTM D638-22",
+        specimen_type: "IV",
+        thickness_mm: 3.2,
+      },
+      material: {
+        profile_id: "PLA-isotropic-v1",
+        youngs_modulus_mpa: 2000,
+        poissons_ratio: 0.35,
+      },
+      load: { force_n: 100 },
+      boundary_conditions: {
+        axial_axis: "x",
+        fixed_axial_face: "x_min",
+        loaded_face: "x_max",
+        load_control: "uniform_end_traction",
+        set_id: "astm-d638-end-traction-v1",
+        transverse_rigid_mode_control: "3d_minimal_rigid_mode_pins",
+        unloaded_faces: "traction_free",
+      },
+      mesh: { max_cell_size_mm: 2.5, element_order: 2, optimize: true },
+    });
+  });
+
 });

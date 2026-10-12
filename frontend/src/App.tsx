@@ -43,6 +43,7 @@ import {
 } from "./lib/workspace";
 import { createFemSubmission, type FemJobStatus, type IsotropicTensileRequest } from "./lib/fem";
 import { loadFemRun, type FemRunDetailData } from "./lib/femRun";
+import { D638_PRESETS, type D638SpecimenType } from "./lib/specimenPresets";
 import FemPage from "./FemPage";
 
 const ResultsChart = lazy(() => import("./ResultsChart"));
@@ -1418,7 +1419,7 @@ function OverviewPage(props: OverviewPageProps) {
       <WorkflowCard number="01" icon={<Database size={18} />} title="Import your measurements" status={hasData ? "complete" : "current"} description={hasData ? `${props.sourceFileName} · ${props.rowCount.toLocaleString()} rows` : "Upload a CSV or TSV from your test rig."} action={hasData ? "Review data" : "Start here"} onClick={props.onData} />
       <WorkflowCard number="02" icon={<Settings2 size={18} />} title="Confirm columns & specimen" status={hasData ? "current" : "locked"} description="Map force and displacement; enter width, thickness and gauge length." action="Configure" onClick={props.onData} />
       <WorkflowCard number="03" icon={<BarChart3 size={18} />} title="Explore the response" status={props.hasAnalysis ? "complete" : "locked"} description={props.hasAnalysis ? "View curves, peak values and downloadable results." : "Review force-extension and stress-strain curves."} action={props.hasAnalysis ? "View results" : "See results"} onClick={props.onResults} />
-      <WorkflowCard number="04" icon={<Box size={18} />} title="Submit an isotropic FEM solve" status="current" description="Configure a rectangular tensile model and inspect its solver Run." action="Open FEM" onClick={props.onFem} />
+      <WorkflowCard number="04" icon={<Box size={18} />} title="Submit an isotropic FEM solve" status="current" description="Configure a rectangular verification coupon or ASTM D638 Type I/IV/V and inspect its solver Run." action="Open FEM" onClick={props.onFem} />
       </section>
 
       <section className="capability-strip">
@@ -1479,6 +1480,19 @@ function DataPage(props: DataPageProps) {
     props.onMetadataChange({
       ...props.specimenMetadata,
       print: { ...props.specimenMetadata.print, [key]: value },
+    });
+  }
+  function applyD638Preset(type: D638SpecimenType): void {
+    const preset = D638_PRESETS[type];
+    props.setSetting("widthMm", String(preset.gaugeWidthMm));
+    props.setSetting("thicknessMm", String(preset.nominalThicknessMm));
+    props.setSetting("gaugeLengthMm", String(preset.gaugeLengthMm));
+    props.onMetadataChange({
+      ...props.specimenMetadata,
+      testStandard: preset.standardRevision,
+      configurationLabel: props.specimenMetadata.configurationLabel === "Configuration 1"
+        ? `${preset.label} FFF`
+        : props.specimenMetadata.configurationLabel,
     });
   }
   return (
@@ -1556,11 +1570,23 @@ function DataPage(props: DataPageProps) {
             <section className="panel geometry-panel">
               <div className="panel-heading"><div><div className="section-eyebrow">03 · SPECIMEN GEOMETRY</div><h2>Enter the measured dimensions</h2><p>For this baseline, the gauge section is treated as rectangular.</p></div><div className="formula-chip">Area = width × thickness</div></div>
               <div className="geometry-grid">
+                <label className="field geometry-preset-field">
+                  <span>Nominal geometry preset</span>
+                  <select defaultValue="" onChange={(event) => {
+                    if (event.target.value) applyD638Preset(event.target.value as D638SpecimenType);
+                  }}>
+                    <option value="">Manual measured dimensions</option>
+                    <option value="I">ASTM D638 Type I · W 13 · G 50</option>
+                    <option value="IV">ASTM D638 Type IV · W 6 · G 25</option>
+                    <option value="V">ASTM D638 Type V · W 3.18 · G 7.62</option>
+                  </select>
+                </label>
                 <NumberField label="Width" unit="mm" value={props.settings.widthMm} onChange={(value) => props.setSetting("widthMm", value)} />
                 <NumberField label="Thickness" unit="mm" value={props.settings.thicknessMm} onChange={(value) => props.setSetting("thicknessMm", value)} />
                 <NumberField label="Gauge length" unit="mm" value={props.settings.gaugeLengthMm} onChange={(value) => props.setSetting("gaugeLengthMm", value)} />
                 <div className="area-preview"><span>Calculated area</span><strong>{(Number(props.settings.widthMm) * Number(props.settings.thicknessMm) || 0).toLocaleString("en-GB", { maximumFractionDigits: 3 })}<small> mm²</small></strong></div>
               </div>
+              <div className="mapping-note"><Info size={15} /><span>ASTM presets fill nominal W, G and the 3.2 mm CAD thickness. Replace width and thickness with measurements from each printed coupon before final reduction. D is grip separation, not a geometry edge.</span></div>
               <div className="mapping-note"><Info size={15} /><span>Force is converted to newtons and displacement to millimetres before calculation. The first displacement value is treated as the zero point.</span></div>
             </section>
 

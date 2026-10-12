@@ -6,9 +6,11 @@ import hashlib
 import json
 import re
 from math import isfinite
-from typing import Literal
+from typing import Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from fdm_strength.specimen_catalog import REFERENCE_STANDARD, d638_definition
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
@@ -39,6 +41,22 @@ class RectangularTensileSpecimen(FrozenModel):
         if self.width_mm < self.thickness_mm:
             raise ValueError("width must be at least the specimen thickness")
         return self
+
+
+class D638TensileSpecimen(FrozenModel):
+    """Checked ASTM D638 Type I/IV/V geometry with a measured test thickness."""
+
+    specimen_id: str = Field(min_length=1, max_length=128)
+    standard_revision: Literal["ASTM D638-22"] = REFERENCE_STANDARD
+    specimen_type: Literal["I", "IV", "V"]
+    thickness_mm: float = Field(gt=0, le=100)
+
+    @field_validator("specimen_id")
+    @classmethod
+    def validate_specimen_id(cls, value: str) -> str:
+        if not _SAFE_ID.fullmatch(value):
+            raise ValueError("specimen_id must be a safe identifier")
+        return value
 
 
 class IsotropicMaterialProfile(FrozenModel):
@@ -82,6 +100,27 @@ class BoundaryConditionSet(FrozenModel):
         return value
 
 
+class D638BoundaryConditionSet(FrozenModel):
+    """End-face load model for the full ASTM D638 dog-bone geometry."""
+
+    set_id: str = Field(min_length=1, max_length=128)
+    axial_axis: Literal["x"] = "x"
+    fixed_axial_face: Literal["x_min"] = "x_min"
+    loaded_face: Literal["x_max"] = "x_max"
+    load_control: Literal["uniform_end_traction"] = "uniform_end_traction"
+    transverse_rigid_mode_control: Literal["3d_minimal_rigid_mode_pins"] = (
+        "3d_minimal_rigid_mode_pins"
+    )
+    unloaded_faces: Literal["traction_free"] = "traction_free"
+
+    @field_validator("set_id")
+    @classmethod
+    def validate_set_id(cls, value: str) -> str:
+        if not _SAFE_ID.fullmatch(value):
+            raise ValueError("set_id must be a safe identifier")
+        return value
+
+
 class GmshMeshSettings(FrozenModel):
     """Deterministic first-pass tetrahedral mesh controls."""
 
@@ -101,6 +140,36 @@ class IsotropicTensileRequest(FrozenModel):
     mesh: GmshMeshSettings
 
 
+class D638IsotropicTensileRequest(FrozenModel):
+    """Immutable input for a full ASTM D638 Type I, IV, or V isotropic solve."""
+
+    schema_version: Literal[2] = 2
+    specimen: D638TensileSpecimen
+    material: IsotropicMaterialProfile
+    load: TensileLoad
+    boundary_conditions: D638BoundaryConditionSet
+    mesh: GmshMeshSettings
+
+
+AnyIsotropicTensileRequest: TypeAlias = IsotropicTensileRequest | D638IsotropicTensileRequest
+
+
+def parse_isotropic_tensile_request(content: bytes | str) -> AnyIsotropicTensileRequest:
+    """Parse a FEM request while retaining schema-v1 replay compatibility."""
+
+    try:
+        payload = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("FEM request is not valid JSON") from error
+    if not isinstance(payload, dict):
+        raise ValueError("FEM request must be a JSON object")
+    if payload.get("schema_version") == 1:
+        return IsotropicTensileRequest.model_validate(payload)
+    if payload.get("schema_version") == 2:
+        return D638IsotropicTensileRequest.model_validate(payload)
+    raise ValueError("unsupported isotropic FEM request schema_version")
+
+
 class AnalyticalTensileResponse(FrozenModel):
     cross_section_area_mm2: float = Field(gt=0)
     nominal_stress_mpa: float = Field(gt=0)
@@ -109,12 +178,27 @@ class AnalyticalTensileResponse(FrozenModel):
     reaction_force_n: float = Field(gt=0)
 
 
-def analytical_tensile_response(request: IsotropicTensileRequest) -> AnalyticalTensileResponse:
-    """Return the constant-area, uniaxial Hookean solution in mm/N/MPa units."""
-    area = request.specimen.width_mm * request.specimen.thickness_mm
+def analytical_tensile_response(
+    request: AnyIsotropicTensileRequest,
+) -> AnalyticalTensileResponse:
+    """Return the nominal uniaxial Hookean reference response in mm/N/MPa units.
+
+    For schema v1 the reference span is the full rectangular coupon. For ASTM
+    D638 schema v2 the nominal stress uses the narrow section and the reference
+    extension uses the ASTM gauge length. The full dog-bone FEM solve itself
+    does not assume constant area.
+    """
+
+    if isinstance(request, D638IsotropicTensileRequest):
+        definition = d638_definition(request.specimen.specimen_type)
+        area = definition.gauge_width_mm * request.specimen.thickness_mm
+        reference_length = definition.gauge_length_mm
+    else:
+        area = request.specimen.width_mm * request.specimen.thickness_mm
+        reference_length = request.specimen.length_mm
     stress = request.load.force_n / area
     strain = stress / request.material.youngs_modulus_mpa
-    extension = strain * request.specimen.length_mm
+    extension = strain * reference_length
     return AnalyticalTensileResponse(
         cross_section_area_mm2=area,
         nominal_stress_mpa=stress,

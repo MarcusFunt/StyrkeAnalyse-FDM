@@ -22,9 +22,11 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from fdm_strength.fem_models import (
-    IsotropicTensileRequest,
+    AnyIsotropicTensileRequest,
+    D638IsotropicTensileRequest,
     canonical_json_bytes,
     model_sha256,
+    parse_isotropic_tensile_request,
 )
 from fdm_strength.provenance import StageProvenance
 from fdm_strength.run_jobs import JobStore, RunJob
@@ -36,6 +38,7 @@ from fdm_strength.stage_contract import (
     canonical_contract_bytes,
 )
 from fdm_strength.stage_registry import StageDefinition, stage_for_operation
+from fdm_strength.specimen_catalog import d638_geometry_metadata
 from fdm_strength.study_models import StudyWorkspaceV3, migrate_workspace_v2_to_v3
 
 MAX_INPUT_BYTES = 24 * 1024 * 1024
@@ -448,7 +451,7 @@ class RunService:
             if submission.upstream_run_ids:
                 raise ValueError("isotropic FEM requests cannot depend on upstream Runs")
             try:
-                fem_request = IsotropicTensileRequest.model_validate_json(input_bytes)
+                fem_request = parse_isotropic_tensile_request(input_bytes)
             except (UnicodeDecodeError, ValidationError, ValueError) as error:
                 raise ValueError(f"invalid isotropic FEM request: {error}") from error
             if canonical_json_bytes(fem_request) != input_bytes:
@@ -1055,7 +1058,7 @@ def _source_input_name(operation: str) -> str:
 
 def _validate_isotropic_fem_outputs(
     result_payload: dict[str, Any],
-    request: IsotropicTensileRequest | None,
+    request: AnyIsotropicTensileRequest | None,
     contract: StageContract,
     outputs: dict[str, bytes],
     provenance: StageProvenance,
@@ -1066,6 +1069,13 @@ def _validate_isotropic_fem_outputs(
         raise ValueError("isotropic FEM result has an unexpected stage identity")
     if result_payload.get("specimen") != request.specimen.model_dump(mode="json"):
         raise ValueError("isotropic FEM result specimen does not match request.json")
+    if isinstance(request, D638IsotropicTensileRequest):
+        expected_geometry = d638_geometry_metadata(
+            request.specimen.specimen_type,
+            request.specimen.thickness_mm,
+        )
+        if result_payload.get("geometry_source") != expected_geometry:
+            raise ValueError("ASTM D638 result geometry source does not match the checked catalog")
 
     material = result_payload.get("material")
     if (

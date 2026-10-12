@@ -15,11 +15,18 @@ from pathlib import Path
 from typing import Any
 
 from fdm_strength.fem_models import (
-    IsotropicTensileRequest,
+    AnyIsotropicTensileRequest,
+    D638IsotropicTensileRequest,
     analytical_tensile_response,
     canonical_json_bytes,
     isotropic_lame_parameters,
     model_sha256,
+    parse_isotropic_tensile_request,
+)
+from fdm_strength.specimen_catalog import (
+    add_d638_gmsh_volume,
+    d638_definition,
+    d638_geometry_metadata,
 )
 from fdm_strength.fem_preview import build_surface_field_preview
 from fdm_strength.provenance import ProvenanceArtifact, StageProvenance
@@ -89,7 +96,7 @@ def _collect_solver_artifacts(output_root: Path) -> dict[str, bytes]:
     return artifact_contents
 
 
-def validate_stage_request(contract: StageContract, request: IsotropicTensileRequest) -> None:
+def validate_stage_request(contract: StageContract, request: AnyIsotropicTensileRequest) -> None:
     """Bind the request's scientific identities and mesh controls to its immutable contract."""
     if contract.schema_version != 2:
         raise ValueError("fdm-l2-isotropic requires stage contract version 2")
@@ -159,7 +166,7 @@ def _require_runtime_policy(contract: StageContract, comm: Any) -> None:
 
 
 def _solve_tensile_case(
-    request: IsotropicTensileRequest,
+    request: AnyIsotropicTensileRequest,
     output_root: Path,
     *,
     include_midspan_gauge: bool = False,
@@ -181,17 +188,29 @@ def _solve_tensile_case(
     rank = comm.rank
     specimen = request.specimen
     material = request.material
-    length = specimen.length_mm
-    width = specimen.width_mm
-    thickness = specimen.thickness_mm
+    is_d638 = isinstance(request, D638IsotropicTensileRequest)
+    if is_d638:
+        if include_midspan_gauge:
+            raise ValueError("midspan verification partition is only defined for schema-v1 rectangles")
+        d638 = d638_definition(specimen.specimen_type)
+        length = d638.overall_length_mm
+        width = d638.overall_width_mm
+        thickness = specimen.thickness_mm
+    else:
+        d638 = None
+        length = specimen.length_mm
+        width = specimen.width_mm
+        thickness = specimen.thickness_mm
     mesh_path = output_root / "mesh.msh"
 
     gmsh.initialize()
     try:
         gmsh.option.setNumber("General.Terminal", 0)
         if rank == 0:
-            gmsh.model.add("rectangular_tensile_specimen")
-            if include_midspan_gauge:
+            gmsh.model.add("astm_d638_tensile_specimen" if is_d638 else "rectangular_tensile_specimen")
+            if is_d638:
+                volumes = add_d638_gmsh_volume(gmsh, specimen.specimen_type, thickness)
+            elif include_midspan_gauge:
                 # The verification mesh is partitioned at its gauge plane so both
                 # DOLFINx and CalculiX measure displacement at the same nodes.
                 left = gmsh.model.occ.addBox(0.0, 0.0, 0.0, length / 2.0, width, thickness)
@@ -270,16 +289,48 @@ def _solve_tensile_case(
 
     bcs = [
         boundary_condition(V.sub(0), x_min, 0.0),
-        boundary_condition(V.sub(0), x_max, analytical.axial_displacement_mm),
         boundary_condition(V.sub(1), origin, 0.0),
         boundary_condition(V.sub(2), origin, 0.0),
         # The additional y pin removes rigid rotation about the x axis.
         boundary_condition(V.sub(1), torsion_anchor, 0.0),
     ]
+    if not is_d638:
+        bcs.insert(1, boundary_condition(V.sub(0), x_max, analytical.axial_displacement_mm))
+
     dx = ufl.Measure("dx", domain=domain)
+    fdim = domain.topology.dim - 1
+    domain.topology.create_connectivity(fdim, domain.topology.dim)
+    right_facets = np.unique(dmesh.locate_entities_boundary(domain, fdim, x_max).astype(np.int32))
+    left_facets = np.unique(dmesh.locate_entities_boundary(domain, fdim, x_min).astype(np.int32))
+    if right_facets.size == 0 or left_facets.size == 0:
+        raise ValueError("Gmsh mesh is missing a required tensile end face")
+    facet_indices = np.concatenate((right_facets, left_facets))
+    facet_values = np.concatenate((
+        np.full(right_facets.size, 1, dtype=np.int32),
+        np.full(left_facets.size, 2, dtype=np.int32),
+    ))
+    facet_order = np.argsort(facet_indices)
+    boundary_tags = dmesh.meshtags(
+        domain,
+        fdim,
+        facet_indices[facet_order],
+        facet_values[facet_order],
+    )
+    ds = ufl.Measure("ds", domain=domain, subdomain_data=boundary_tags)
+
     bilinear = ufl.inner(cauchy_stress(trial), strain(test)) * dx
     zero_body_force = fem.Constant(domain, np.zeros(3, dtype=PETSc.ScalarType))
     linear = ufl.inner(zero_body_force, test) * dx
+    end_traction_mpa = None
+    if is_d638:
+        if d638 is None:
+            raise ValueError("ASTM D638 geometry definition is unavailable")
+        end_traction_mpa = request.load.force_n / (d638.overall_width_mm * thickness)
+        traction = fem.Constant(
+            domain,
+            np.asarray((end_traction_mpa, 0.0, 0.0), dtype=PETSc.ScalarType),
+        )
+        linear = linear + ufl.inner(traction, test) * ds(1)
     problem = LinearProblem(
         bilinear,
         linear,
@@ -309,19 +360,6 @@ def _solve_tensile_case(
     )
     von_mises_field.x.scatter_forward()
 
-    fdim = domain.topology.dim - 1
-    domain.topology.create_connectivity(fdim, domain.topology.dim)
-    right_facets = np.unique(dmesh.locate_entities_boundary(domain, fdim, x_max).astype(np.int32))
-    if right_facets.size == 0:
-        raise ValueError("Gmsh mesh has no loaded-face facets")
-    right_tags = dmesh.meshtags(
-        domain,
-        fdim,
-        right_facets,
-        np.full(right_facets.size, 1, dtype=np.int32),
-    )
-    ds = ufl.Measure("ds", domain=domain, subdomain_data=right_tags)
-
     def assemble_global(expression):
         local_value = fem.assemble_scalar(fem.form(expression))
         return comm.allreduce(local_value, op=MPI.SUM)
@@ -344,7 +382,7 @@ def _solve_tensile_case(
     )
     if include_midspan_gauge and measured_midspan_displacement is None:
         raise ValueError("verification mesh is missing its partitioned midspan gauge plane")
-    nominal_strain = measured_extension / length
+    nominal_strain = analytical.nominal_strain if is_d638 else measured_extension / length
 
     local_stress = stress_field.x.array.reshape((-1, 3, 3))[:, 0, 0]
     stress_min = float(comm.allreduce(float(np.min(local_stress)), op=MPI.MIN))
@@ -404,6 +442,11 @@ def _solve_tensile_case(
             ),
             "nominal_stress_mpa": analytical.nominal_stress_mpa,
             "nominal_strain": nominal_strain,
+            **(
+                {"analytical_gauge_extension_mm": analytical.axial_displacement_mm}
+                if is_d638
+                else {}
+            ),
             "volume_average_axial_stress_mpa": mean_axial_stress,
             "peak_von_mises_stress_mpa": peak_von_mises,
             "axial_stress_uniformity_relative_range": stress_uniformity_range,
@@ -432,7 +475,7 @@ def _write_json(path: Path, payload: dict[str, Any]) -> bytes:
 
 
 def _write_result_and_provenance(
-    request: IsotropicTensileRequest,
+    request: AnyIsotropicTensileRequest,
     contract: StageContract,
     output_root: Path,
     solver_output: dict[str, Any],
@@ -463,6 +506,16 @@ def _write_result_and_provenance(
         "stage_id": contract.stage_id,
         "result": solver_output["result"],
         "specimen": request.specimen.model_dump(mode="json"),
+        **(
+            {
+                "geometry_source": d638_geometry_metadata(
+                    request.specimen.specimen_type,
+                    request.specimen.thickness_mm,
+                )
+            }
+            if isinstance(request, D638IsotropicTensileRequest)
+            else {}
+        ),
         "material": {
             **request.material.model_dump(mode="json"),
             "sha256": model_sha256(request.material),
@@ -471,7 +524,23 @@ def _write_result_and_provenance(
         "boundary_conditions": {
             **request.boundary_conditions.model_dump(mode="json"),
             "sha256": model_sha256(request.boundary_conditions),
-            "prescribed_displacement_mm": solver_output["result"]["measured_axial_displacement_mm"],
+            **(
+                {
+                    "applied_end_traction_mpa": (
+                        request.load.force_n
+                        / (
+                            d638_definition(request.specimen.specimen_type).overall_width_mm
+                            * request.specimen.thickness_mm
+                        )
+                    )
+                }
+                if isinstance(request, D638IsotropicTensileRequest)
+                else {
+                    "prescribed_displacement_mm": solver_output["result"][
+                        "measured_axial_displacement_mm"
+                    ]
+                }
+            ),
             "transverse_anchor_coordinates_mm": [
                 [0.0, 0.0, 0.0],
                 [0.0, 0.0, request.specimen.thickness_mm],
@@ -564,7 +633,7 @@ def main() -> int:
     wall_start = time.monotonic()
     try:
         contract = load_stage_contract(work_root)
-        request = IsotropicTensileRequest.model_validate_json(
+        request = parse_isotropic_tensile_request(
             (work_root / "in" / "request.json").read_bytes()
         )
         validate_stage_request(contract, request)

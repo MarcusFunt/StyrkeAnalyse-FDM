@@ -38,6 +38,7 @@ export default function FemRunDetail({ detail }: { detail: FemRunDetailData }) {
   const { run, envelope, provenance } = detail;
   const evidence = femEvidenceLabels(run.status, envelope.verification_status);
   const specimen = envelope.specimen;
+  const geometrySource = envelope.geometry_source;
   const material = envelope.material;
   const boundaryConditions = envelope.boundary_conditions;
   const mesh = envelope.mesh;
@@ -81,9 +82,24 @@ export default function FemRunDetail({ detail }: { detail: FemRunDetailData }) {
       <section className="panel fem-provenance-panel">
         <div className="panel-heading"><div><div className="section-eyebrow">REPRODUCIBILITY</div><h2>Solver inputs and provenance</h2><p>Recorded with the sealed Run and server-controlled stage image.</p></div><Fingerprint size={18} /></div>
         <div className="fem-metadata-columns">
-          <MetadataGrid eyebrow="SPECIMEN" title={pretty(specimen.specimen_id)} values={[
-            ["Length", `${pretty(specimen.length_mm)} mm`], ["Width", `${pretty(specimen.width_mm)} mm`], ["Thickness", `${pretty(specimen.thickness_mm)} mm`],
-          ]} />
+          <MetadataGrid eyebrow="SPECIMEN" title={pretty(specimen.specimen_id)} values={
+            specimen.specimen_type
+              ? [
+                  ["Standard", pretty(specimen.standard_revision)],
+                  ["Type", pretty(specimen.specimen_type)],
+                  ["Overall length", `${pretty(geometrySource?.overall_length_mm)} mm`],
+                  ["End width", `${pretty(geometrySource?.overall_width_mm)} mm`],
+                  ["Gauge width", `${pretty(geometrySource?.gauge_width_mm)} mm`],
+                  ["Gauge length", `${pretty(geometrySource?.gauge_length_mm)} mm`],
+                  ["Thickness", `${pretty(specimen.thickness_mm)} mm`],
+                  ["Grip separation D", `${pretty(geometrySource?.grip_separation_mm)} mm`],
+                ]
+              : [
+                  ["Length", `${pretty(specimen.length_mm)} mm`],
+                  ["Width", `${pretty(specimen.width_mm)} mm`],
+                  ["Thickness", `${pretty(specimen.thickness_mm)} mm`],
+                ]
+          } />
           <MetadataGrid eyebrow="MATERIAL" title={pretty(material.profile_id)} values={[
             ["Young’s modulus", `${pretty(material.youngs_modulus_mpa)} MPa`], ["Poisson’s ratio", pretty(material.poissons_ratio)], ["Material SHA-256", material.sha256],
           ]} />

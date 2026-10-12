@@ -331,6 +331,8 @@ tbody tr:hover { background: #f8fbfa; }
 .fem-checkbox { display: flex; align-items: center; align-self: end; gap: 8px; min-height: 35px; color: #4e666d; font-size: 9px; font-weight: 600; }
 .fem-checkbox input { width: 14px; height: 14px; accent-color: #287a72; }
 .fem-form-note { margin: 8px 0 0; color: #63777c; font-size: 8.5px; line-height: 1.45; }
+.d638-preset-summary { display: grid; gap: 4px; padding: 9px 10px; border: 1px solid #dce8e5; border-radius: 7px; background: #f5faf8; color: #50686d; font-size: 8.5px; line-height: 1.45; }
+.d638-preset-summary strong { color: #315b55; font-size: 9.5px; }
 .fem-submit-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 12px; border-top: 1px solid #e8eef0; }
 .fem-submit-row > span { color: #64797e; font-size: 8.5px; line-height: 1.4; }
 .fem-submit-row .button { min-height: 36px; }
